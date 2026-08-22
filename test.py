@@ -430,6 +430,27 @@ def test_batch_matches_single_pair(mode: str):
     assert produced == expected
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_batch_survives_a_pair_the_batch_kernel_cannot_take(compiled_backend, mode: str):
+    """A pair the stored kernel refuses must take the linear path alone, not sink the batch.
+
+    The device kernel indexes its carry by the first sequence, so a tall pair fails it even when
+    the matrix is small; and a pair over the stored budget fails a different bound. Either one
+    used to divert every other pair in the batch onto the slow per-pair route.
+    """
+    tall = ("A" * 40_000, "ACGT" * 4)
+    ordinary = random_pair(20, 60)
+    firsts = [tall[0], ordinary[0]]
+    seconds = [tall[1], ordinary[1]]
+    batched = getattr(affinegaps, f"{'needleman_wunsch' if mode == 'global' else 'smith_waterman'}_gotoh_alignments")
+    produced = batched(firsts, seconds, **SCORING, **compiled_backend)
+    for (first, second), (left, right, score) in zip(zip(firsts, seconds), produced):
+        # A global path spans both sequences; a local one spans only the core it found.
+        assert left.replace("-", "") == first if mode == "global" else left.replace("-", "") in first
+        assert right.replace("-", "") == second if mode == "global" else right.replace("-", "") in second
+        assert rescore(left, right) == score
+
+
 def test_rejects_what_it_cannot_do():
     """The dispatcher must refuse rather than quietly doing something else."""
     with pytest.raises(ValueError):

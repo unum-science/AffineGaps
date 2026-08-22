@@ -63,6 +63,9 @@ On a 30 kilobase pair, mutated harder each row:
 
 A full sweep never notices how different the sequences are, so reach for WFA2 on near-identical inputs and for this on divergent or very long ones.
 
+Linear memory is meant literally, and it is what makes the long end reachable at all.
+A four-megabase pair reconstructs inside a gigabyte of device memory, and doubling the pair grows that by a third rather than by four, so an 80-gigabyte card has room for sequences far longer than anything measured here.
+
 ## Installation
 
 There is no package-registry release; the repository is the distribution.
