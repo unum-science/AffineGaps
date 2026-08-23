@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="934" height="500" viewBox="0 0 934 500" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" role="img" aria-label="Alignment wall clock against input size, log-log">
+<rect width="934" height="500" rx="14" fill="#fcfcfb"/>
+<text x="96" y="40" font-size="21" font-weight="650" fill="#0b0b0b">Protein Alignment Speed</text>
+<text x="96" y="62" font-size="13" fill="#52514e">Gotoh, one pair, traceback included. Both axes logarithmic, lower is better.</text>
+<line x1="96" y1="404.0" x2="894" y2="404.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="408.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">10 µs</text>
+<line x1="96" y1="360.0" x2="894" y2="360.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="364.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">100 µs</text>
+<line x1="96" y1="316.0" x2="894" y2="316.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="320.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 ms</text>
+<line x1="96" y1="272.0" x2="894" y2="272.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="276.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">10 ms</text>
+<line x1="96" y1="228.0" x2="894" y2="228.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="232.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">100 ms</text>
+<line x1="96" y1="184.0" x2="894" y2="184.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="188.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 s</text>
+<line x1="96" y1="140.0" x2="894" y2="140.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="144.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">10 s</text>
+<line x1="96" y1="96.0" x2="894" y2="96.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="100.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">100 s</text>
+<line x1="96" y1="404" x2="894" y2="404" stroke="#cfcec9" stroke-width="1"/>
+<line x1="125.6" y1="404" x2="125.6" y2="409" stroke="#cfcec9" stroke-width="1"/>
+<text x="125.6" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">64 aa</text>
+<line x1="231.1" y1="404" x2="231.1" y2="409" stroke="#cfcec9" stroke-width="1"/>
+<text x="231.1" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">256 aa</text>
+<line x1="336.7" y1="404" x2="336.7" y2="409" stroke="#cfcec9" stroke-width="1"/>
+<text x="336.7" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 Kaa</text>
+<line x1="442.2" y1="404" x2="442.2" y2="409" stroke="#cfcec9" stroke-width="1"/>
+<text x="442.2" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4 Kaa</text>
+<line x1="547.8" y1="404" x2="547.8" y2="409" stroke="#cfcec9" stroke-width="1"/>
+<text x="547.8" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">16 Kaa</text>
+<line x1="653.3" y1="404" x2="653.3" y2="409" stroke="#cfcec9" stroke-width="1"/>
+<text x="653.3" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">64 Kaa</text>
+<line x1="758.9" y1="404" x2="758.9" y2="409" stroke="#cfcec9" stroke-width="1"/>
+<text x="758.9" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">256 Kaa</text>
+<line x1="864.4" y1="404" x2="864.4" y2="409" stroke="#cfcec9" stroke-width="1"/>
+<text x="864.4" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 Maa</text>
+<text x="495" y="448" font-size="12" text-anchor="middle" fill="#52514e">pair length, amino-acid residues</text>
+<text x="20" y="250" font-size="12" text-anchor="middle" fill="#52514e" transform="rotate(-90 20 250)">wall clock</text>
+<line x1="786.0" y1="378.0" x2="878.0" y2="331.8" stroke="#8a8984" stroke-width="1.5" stroke-dasharray="4 4" stroke-linecap="round"/>
+<text x="874.0" y="322.8" font-size="12.5" text-anchor="end" fill="#8a8984">n²</text>
+<path d="M125.6,349.5 L231.1,339.8 L336.7,310.6 L442.2,286.4 L547.8,258.2 L653.3,238.1 L758.9,206.5 L864.4,167.6" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="349.5" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="231.1" cy="339.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="336.7" cy="310.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="442.2" cy="286.4" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="547.8" cy="258.2" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="653.3" cy="238.1" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="758.9" cy="206.5" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="864.4" cy="167.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,374.1 L231.1,323.9 L336.7,270.9 L442.2,216.8 L547.8,163.9 L653.3,110.3" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="374.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="231.1" cy="323.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="336.7" cy="270.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="442.2" cy="216.8" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="547.8" cy="163.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="653.3" cy="110.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,387.2 L231.1,351.6 L336.7,309.0 L442.2,251.4 L547.8,201.8 L653.3,146.2" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="387.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="231.1" cy="351.6" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="336.7" cy="309.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="442.2" cy="251.4" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="547.8" cy="201.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="653.3" cy="146.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,226.2 L231.1,234.8 L336.7,230.0 L442.2,191.3 L547.8,125.8" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="226.2" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="231.1" cy="234.8" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="336.7" cy="230.0" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="442.2" cy="191.3" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="547.8" cy="125.8" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="100" cy="472" r="4" fill="#2a78d6"/>
+<text x="111" y="476" font-size="12.5" fill="#52514e">AffineGaps, H100</text>
+<circle cx="245.8" cy="472" r="4" fill="#eb6834"/>
+<text x="256.8" y="476" font-size="12.5" fill="#52514e">AffineGaps, 1xSPR</text>
+<circle cx="404.7" cy="472" r="4" fill="#1baf7a"/>
+<text x="415.7" y="476" font-size="12.5" fill="#52514e">Parasail, 1xSPR</text>
+<circle cx="550.5" cy="472" r="4" fill="#eda100"/>
+<text x="561.5" y="476" font-size="12.5" fill="#52514e">EMBOSS needle, 1xSPR</text>
+</svg>

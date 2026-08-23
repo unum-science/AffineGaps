@@ -8,7 +8,7 @@ both read `paired` at the same span, so within one span the three are filled in 
 
 Everything is indexed by `(start, length)` rather than by two endpoints, so a bifurcation reads
 strictly smaller lengths and every cell of a span is independent, which is what the device sweep
-needs. Memory is `O(n^2)` and time is `O(n^3)`, the interior-loop term being bounded by capping a
+needs. Memory is $O(n^2)$ and time is $O(n^3)$, the interior-loop term being bounded by capping a
 loop at `MAX_LOOP` unpaired bases as every implementation of this recurrence does.
 
 Energies are integer decikilocalories per mole throughout, so a fold is reproducible bit for bit.

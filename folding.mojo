@@ -7,7 +7,7 @@ inside a multibranched loop, and `external` for one that is not enclosed. Both `
 three launches per span rather than one.
 
 Everything is indexed by `(start, length)`, so a bifurcation reads strictly smaller lengths and
-every cell of a span is independent. Memory is `O(n^2)` and time is `O(n^3)`, the interior-loop
+every cell of a span is independent. Memory is $O(n^2)$ and time is $O(n^3)$, the interior-loop
 term bounded by capping a loop at `MAX_LOOP` unpaired bases as this recurrence always is.
 
 Energies are integer decikilocalories per mole, so a fold is reproducible bit for bit rather than

@@ -10,7 +10,7 @@ The table is indexed by `(start, length)` on each sequence rather than by four e
 bifurcation then reads strictly smaller lengths in both dimensions, so every cell on the
 anti-diagonal `length_first + length_second` is independent, which is what the device sweep needs.
 
-Cost is `O(n^6)` in time and `O(n^2 m^2)` in memory, and the memory is inherent: a bifurcation at
+Cost is $O(n^6)$ in time and $O(n^2 m^2)$ in memory, and the memory is inherent: a bifurcation at
 one layer reads every layer beneath it, so no Hirschberg-style band exists. Traceback is therefore
 free, since the whole table is resident regardless.
 

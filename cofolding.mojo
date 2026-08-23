@@ -7,10 +7,10 @@ scoring is a substitution matrix and a pair table, with no energy model anywhere
 
 The table is indexed by `(start, length)` on each sequence rather than by four endpoints. A
 bifurcation then reads strictly smaller lengths in both dimensions, which makes every cell on the
-anti-diagonal `length_first + length_second` independent and turns `O(n^6)` work into `n + m + 1`
+anti-diagonal `length_first + length_second` independent and turns $O(n^6)$ work into `n + m + 1`
 dependent layers with full parallelism inside each.
 
-Memory is `O(n^2 m^2)` and that is inherent, not an implementation limit: a bifurcation at one
+Memory is $O(n^2 m^2)$ and that is inherent, not an implementation limit: a bifurcation at one
 layer reads every layer beneath it, so nothing can be retired and no Hirschberg-style band exists.
 Measured at n = 24, a perfect freeing oracle still leaves 75.5% of the table live at peak. The
 consolation is that traceback costs nothing extra, since the whole table is resident regardless.

@@ -8,9 +8,20 @@ Unlike potentially faster algorithms in [StringZilla](https://github.com/ashvard
 Gotoh reconstructs in __linear memory__; Sankoff provably cannot, and the reason is worth reading below.
 A NumPy reference implementation ships beside every Mojo kernel and serves as the parity oracle.
 
-- __`alignment`__ — Gotoh, global and local, in $O(nm)$ time and $O(\min(n, m))$ memory via Hirschberg, reconstructing the aligned sequences.
-- __`folding`__ — Zuker minimum free energy over the Turner model, in $O(n^3)$ time and $O(n^2)$ memory, reconstructing a dot-bracket structure.
-- __`cofolding`__ — Sankoff, simultaneous alignment and folding, in $O(n^3 m^3)$ time and $O(n^2 m^2)$ memory, reconstructing the aligned sequences plus one shared structure.
+- __`alignment`__ — two sequences lined up, so equivalent letters sit above each other and dashes mark what one has and the other lacks.
+  A ten-letter deletion is one mutation and not ten, so a gap is priced by run — one opening charge plus a cheaper per-letter extension, which is Gotoh's affine gap cost.
+  Tracing the path back would normally cost a whole $O(nm)$ matrix, so Hirschberg's recursive splitting halves the problem, solves both halves, and joins them.
+  $O(nm)$ time and $O(\min(n, m))$ memory, global end-to-end or local best-window, returning the two sequences with their gaps written in and the score.
+
+- __`folding`__ — one RNA strand, which sticks to itself where A meets U and G meets C, snapping back into stems and loops.
+  Zuker's recurrence tries every way the strand can pair with itself and keeps the most stable, pricing each stem and loop from the Turner tables of measured energies.
+  The answer is a dot-bracket string, one character per base, where a matched `(` and `)` are two bases paired together and a `.` is a base left alone.
+  $O(n^3)$ time and $O(n^2)$ memory, returning that string and its free energy in kilocalories per mole.
+
+- __`cofolding`__ — the same RNA from two species, aligned and folded in one sweep rather than aligned first and folded second.
+  A pair counts only where both strands can form it, so two letters changing together while the pair survives is evidence of a structure evolution is protecting, and that covariation is what Sankoff's recurrence scores.
+  The shared structure is one dot-bracket string over the alignment columns rather than over either sequence, describing the pairing both sequences agree on.
+  $O(n^3 m^3)$ time and $O(n^2 m^2)$ memory, returning the aligned pair, that string, and the score.
 
 ## Less Wrong
 
@@ -38,7 +49,71 @@ During my exploration of existing implementations, I've noticed several bugs:
 
 ## Benchmarks
 
-Each recurrence is measured against the tool people already reach for — WFA2 for alignment, RNAstructure's `Fold` for folding.
+Throughput first, against the same kernels compiled for one CPU core, with third-party tools where one implements the same recurrence.
+Every cell is __wall time · cell-update rate__, and a cell update is one evaluation of the innermost recurrence rather than one entry of the table — `n * m` for alignment, an interior-loop triangle plus two bifurcation scans per span for folding, one bifurcation per window pair for cofolding.
+Counting the work rather than the storage is what lets the same unit describe all three: a rate over table entries would fall with length by construction for the two folding recurrences, which spend $O(n)$ and $O(n^2)$ work per entry.
+
+A dash is a run that did not finish inside five minutes or whose table exceeded a 24 GiB budget.
+Lengths climb by four where time is quadratic, by two where it is cubic and by half where it is sextic, so each ladder spans a comparable range of wall clock rather than a comparable range of length.
+Best of three below 4096 and a single run above, every answer checked against the serial sweep, and the third-party rows are command-line invocations, so their sub-100 ms cells are mostly process startup.
+
+### Protein Alignment Speed
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/alignment-dark.svg">
+  <img alt="Alignment wall clock against pair length" src="assets/alignment-light.svg">
+</picture>
+
+| Variant           |               64 aa |              256 aa |              1 Kaa |               4 Kaa |               16 Kaa |               64 Kaa |            256 Kaa |                1 Maa |
+| :---------------- | ------------------: | ------------------: | -----------------: | ------------------: | -------------------: | -------------------: | -----------------: | -------------------: |
+| AffineGaps, H100  |   173 µs · 24 MCUPS |  287 µs · 229 MCUPS | 1.3 ms · 790 MCUPS | 4.7 ms · 3.58 GCUPS | 20.5 ms · 13.1 GCUPS | 59.0 ms · 72.8 GCUPS | 307 ms · 224 GCUPS | 2.36 s · 467 GCUPS ¹ |
+| AffineGaps, 1xSPR |    48 µs · 86 MCUPS |   660 µs · 99 MCUPS | 10.6 ms · 99 MCUPS |   179 ms · 94 MCUPS |    2.85 s · 94 MCUPS |    47.3 s · 91 MCUPS |                  — |                    — |
+| Parasail, 1xSPR   |   24 µs · 171 MCUPS |  155 µs · 423 MCUPS | 1.4 ms · 728 MCUPS | 29.4 ms · 571 MCUPS |   394 ms · 682 MCUPS | 7.22 s · 595 MCUPS ² |                  — |                    — |
+| EMBOSS, 1xSPR     | 110 ms · 37 KCUPS ³ | 70.0 ms · 936 KCUPS | 90.0 ms · 12 MCUPS |   680 ms · 25 MCUPS |  21.0 s · 13 MCUPS ² |                    — |                  — |                    — |
+
+> Measured 23 August 2026, random protein pairs, BLOSUM62 scaled fivefold.
+> Columns are pair lengths in amino-acid "aa" residues.
+> No row is adaptive, so none depends on how similar the inputs are.
+> ¹ Still climbing; the card is not saturated.
+> ² Stops on memory: a stored traceback matrix costs bytes per cell.
+> ³ Dominated by process startup, as every command-line cell under a tenth of a second is.
+
+### RNA Folding Speed
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/folding-dark.svg">
+  <img alt="Folding wall clock against sequence length" src="assets/folding-light.svg">
+</picture>
+
+| Variant             |              128 nt |              256 nt |               512 nt |                1 Knt |                2 Knt |               4 Knt |               8 Knt |                 16 Knt |
+| :------------------ | ------------------: | ------------------: | -------------------: | -------------------: | -------------------: | ------------------: | ------------------: | ---------------------: |
+| AffineGaps, H100    | 2.1 ms · 2.27 GCUPS | 4.4 ms · 4.95 GCUPS | 10.0 ms · 11.0 GCUPS | 25.2 ms · 24.6 GCUPS | 77.7 ms · 50.2 GCUPS | 393 ms · 68.9 GCUPS | 2.58 s · 77.3 GCUPS |    18.6 s · 82.4 GCUPS |
+| AffineGaps, 1xSPR   |  7.1 ms · 675 MCUPS | 37.2 ms · 589 MCUPS |   202 ms · 545 MCUPS |   1.44 s · 430 MCUPS |   12.9 s · 303 MCUPS |                   — |                   — |                      — |
+| ViennaRNA, 1xSPR    |  50.0 ms · 96 MCUPS | 50.0 ms · 438 MCUPS |   250 ms · 440 MCUPS |   900 ms · 687 MCUPS |   3.93 s · 993 MCUPS | 17.7 s · 1.53 GCUPS | 99.6 s · 2.01 GCUPS | 9.6 min · 2.65 GCUPS ¹ |
+| RNAstructure, 1xSPR |   110 ms · 44 MCUPS |  200 ms · 110 MCUPS |   1.00 s · 110 MCUPS |    6.44 s · 96 MCUPS |    47.6 s · 82 MCUPS |                   — |                   — |                      — |
+
+> Measured 23 August 2026, random RNA, Turner 2004 parameters.
+> Columns are sequence lengths in nucleotide "nt" bases.
+> ¹ Held in 1.45 GiB; time binds, not memory.
+
+### RNA Cofolding Speed
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/cofolding-dark.svg">
+  <img alt="Cofolding wall clock against sequence length" src="assets/cofolding-light.svg">
+</picture>
+
+| Variant             |               24 nt |                32 nt |                48 nt |                64 nt |                96 nt |                128 nt |              192 nt |               256 nt |
+| :------------------ | ------------------: | -------------------: | -------------------: | -------------------: | -------------------: | --------------------: | ------------------: | -------------------: |
+| AffineGaps, H100    | 1.1 ms · 5.03 GCUPS |  2.4 ms · 12.4 GCUPS | 19.8 ms · 17.1 GCUPS | 67.1 ms · 28.5 GCUPS |  414 ms · 52.6 GCUPS | 2.02 s · 60.3 GCUPS ¹ | 30.8 s · 45.2 GCUPS | 3.7 min · 35.6 GCUPS |
+| AffineGaps, 1xSPR   | 4.4 ms · 1.19 GCUPS | 23.7 ms · 1.26 GCUPS |   407 ms · 835 MCUPS |   3.17 s · 602 MCUPS |   41.5 s · 524 MCUPS |                     — |                   — |                    — |
+| RNAstructure, 1xSPR |   170 ms · 31 MCUPS |    490 ms · 61 MCUPS |    4.30 s · 79 MCUPS |    22.9 s · 83 MCUPS | 4.5 min · 81 MCUPS ² |                     — |                   — |                    — |
+
+> Measured 23 August 2026, random RNA, covariance scoring.
+> Columns are sequence lengths in nucleotide "nt" bases.
+> `dynalign` ran with `imaxseparation = n`, which switches its banding off, and scores Turner energies instead — so compare the clock, not the rate.
+> ¹ Rate peaks here; past L2 the bifurcation scan scatters against HBM.
+> ² Where one core stops being practical.
 
 ### Alignment Speed Against WFA2
 
@@ -82,18 +157,18 @@ Accuracy is reported on __ArchiveII__, the Mathews lab set of 3,975 known struct
 It plays the role here that BLOSUM62 and Biopython play on the protein side: an external reference this project is measured against rather than tuned on.
 The set is not vendored; the harness reads it from `data/archive-ii`.
 
-Both columns score predicted base pairs against the __known structure__ in each file, so `Fold` is a second contestant rather than the target.
-F1 is the harmonic mean of sensitivity and positive predictive value, dimensionless and bounded by zero and one.
-The last column is the mean per-sequence difference in F1 with its standard error, negative where `Fold` wins, because comparing two averages over different sequences hides more than it shows.
+Every predicted pair is checked against the structure that was actually measured for that molecule, so both columns are contestants and neither one is the answer key.
+F1 runs from zero to one and rewards finding real pairs while punishing invented ones, so no folder can win by guessing generously.
+The last column subtracts the two scores sequence by sequence and averages, so a negative number means `Fold` won and the ± is how far that verdict would move on another sample of the same size.
 
-| family         | sequences | AffineGaps F1 | RNAstructure F1 |     ΔF1 ± s.e. |
-| :------------- | --------: | ------------: | --------------: | -------------: |
-| tRNA           |       120 |         0.571 |           0.677 | −0.107 ± 0.028 |
-| 5S rRNA        |       120 |         0.615 |           0.610 | +0.005 ± 0.024 |
-| SRP RNA        |       120 |         0.626 |           0.630 | −0.003 ± 0.019 |
-| RNase P        |       120 |         0.461 |           0.513 | −0.053 ± 0.013 |
-| tmRNA          |       120 |         0.379 |           0.390 | −0.011 ± 0.012 |
-| group I intron |        38 |         0.471 |           0.496 | −0.025 ± 0.027 |
+| Family         | Role                      | Sequences | AffineGaps F1 | RNAstructure F1 |     ΔF1 ± s.e. |
+| :------------- | :------------------------ | --------: | ------------: | --------------: | -------------: |
+| tRNA           | delivers amino acids      |       120 |         0.571 |           0.677 | −0.107 ± 0.028 |
+| 5S rRNA        | scaffolds the ribosome    |       120 |         0.615 |           0.610 | +0.005 ± 0.024 |
+| SRP RNA        | targets new proteins      |       120 |         0.626 |           0.630 | −0.003 ± 0.019 |
+| RNase P        | trims tRNA precursors     |       120 |         0.461 |           0.513 | −0.053 ± 0.013 |
+| tmRNA          | rescues stalled ribosomes |       120 |         0.379 |           0.390 | −0.011 ± 0.012 |
+| Group I intron | splices itself out        |        38 |         0.471 |           0.496 | −0.025 ± 0.027 |
 
 __Only tRNA and RNase P differ by more than their uncertainty.__
 On the other four families the reduced model is statistically indistinguishable from the complete one.
@@ -289,8 +364,9 @@ A bifurcation at one layer reads every layer beneath it, so nothing can ever be 
 Measured at $n = 24$, even a perfect freeing oracle leaves 75.5% of the table live at peak, which is why no Hirschberg-style band exists here and why the linear-memory claim is scoped to alignment.
 The consolation is that __traceback costs nothing extra__: the whole table is resident regardless, so reconstruction is a walk rather than a second pass.
 
-Time is $O(n^3 m^3)$ and binds before memory does.
-On one idle H100 the exact sweep is comfortable to roughly 200 bases, which covers tRNA, 5S rRNA, microRNA precursors and most riboswitches, and gets expensive immediately after.
+Time is $O(n^3 m^3)$ and binds long before memory does, which is what the throughput table above measures.
+The reach covers tRNA, 5S rRNA, microRNA precursors and most riboswitches, and gets expensive immediately after.
+Nothing refuses an oversized request: the table is allocated on the card and again on the host for the traceback walk, so a pair too long to fit fails as an allocation error from the driver rather than as a refusal from this library.
 For longer sequences the banded approximations remain the right tool; this one exists to be __exact__, and to be the oracle they can be measured against.
 
 ## Using the Command Line
@@ -377,16 +453,20 @@ Three groups, one per module, each naming what the tool does and where this diff
 
 ### Alignment
 
-- [WFA2](https://github.com/smarco/WFA2-lib) — exact and gap-affine, with time proportional to the alignment score rather than to the product of the lengths. That makes it the faster choice on near-identical sequences and the one that exhausts memory on divergent or very long ones, which is what the benchmark above measures.
+- [WFA2](https://github.com/smarco/WFA2-lib) — exact and gap-affine, with time proportional to the alignment score rather than to the product of the lengths.
+  That makes it the faster choice on near-identical sequences and the one that exhausts memory on divergent or very long ones, which is what the benchmark above measures.
 - [parasail](https://github.com/jeffdaily/parasail) — vectorised Smith-Waterman and Needleman-Wunsch for the CPU, with no accelerator path.
 - [SeqAn](https://github.com/seqan/seqan3) — a general sequence-analysis library whose aligner covers the same recurrences among much else.
 - [Biopython](https://biopython.org) — `PairwiseAligner` implements the same recurrences in Python, and is the readability reference rather than the speed one.
-- [EMBOSS](http://emboss.open-bio.org) — `needle` is seemingly the only other open-source implementation that gets the initialization right, in `embAlignPathCalcWithEndGapPenalties` and `embAlignGetScoreNWMatrix` inside `nucleus/embaln.c`. It was [written in 1999 by Alan Bleasby](https://www.bioinformatics.nl/cgi-bin/emboss/help/needle) and rescored in 2000, carries no vectorisation, and is still widely recommended. It scores in `float`, which drifts on long sequences.
+- [EMBOSS](http://emboss.open-bio.org) — `needle` is seemingly the only other open-source implementation that gets the initialization right, in `embAlignPathCalcWithEndGapPenalties` and `embAlignGetScoreNWMatrix` inside `nucleus/embaln.c`.
+  It was [written in 1999 by Alan Bleasby](https://www.bioinformatics.nl/cgi-bin/emboss/help/needle) and rescored in 2000, carries no vectorisation, and is still widely recommended.
+  It scores in `float`, which drifts on long sequences.
 - [StringZilla](https://github.com/ashvardanian/StringZilla) — faster still, but it scores without reconstructing an alignment.
 
 ### Folding
 
-- [RNAstructure](https://rna.urmc.rochester.edu/RNAstructure.html) — the Mathews lab suite whose `Fold` program implements the complete Turner model, including the coaxial stacking and the special internal-loop tables omitted here. It is the contestant in the accuracy table above.
+- [RNAstructure](https://rna.urmc.rochester.edu/RNAstructure.html) — the Mathews lab suite whose `Fold` program implements the complete Turner model, including the coaxial stacking and the special internal-loop tables omitted here.
+  It is the contestant in the accuracy table above.
 - [ViennaRNA](https://www.tbi.univie.ac.at/RNA/) — `RNAfold` and a partition function over the same thermodynamic model, so it answers how probable a pairing is rather than only which structure is optimal.
 - [LinearFold](https://github.com/LinearFold/LinearFold) — beam search in linear time, trading exactness for a sweep that scales to whole messenger RNAs.
 

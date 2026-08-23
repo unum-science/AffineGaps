@@ -979,7 +979,7 @@ def score_path(
     """Scores a reconstructed path under the affine rule, in time linear in the alignment.
 
     Deriving the score from the path rather than from a second dynamic-programming pass costs
-    `O(rows + columns)` instead of `O(rows * columns)`, and makes the reported score consistent
+    $O(rows + columns)$ instead of $O(rows * columns)$, and makes the reported score consistent
     with the returned strings by construction rather than by coincidence.
     """
     var total = Int32(0)

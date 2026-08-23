@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="934" height="500" viewBox="0 0 934 500" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" role="img" aria-label="Folding wall clock against input size, log-log">
+<rect width="934" height="500" rx="14" fill="#1a1a19"/>
+<text x="96" y="40" font-size="21" font-weight="650" fill="#ffffff">RNA Folding Speed</text>
+<text x="96" y="62" font-size="13" fill="#c3c2b7">Zuker over Turner 2004, structure reconstructed. Both axes logarithmic, lower is better.</text>
+<line x1="96" y1="404.0" x2="894" y2="404.0" stroke="#2e2e2c" stroke-width="1"/>
+<text x="84" y="408.0" font-size="11.5" text-anchor="end" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 ms</text>
+<line x1="96" y1="352.7" x2="894" y2="352.7" stroke="#2e2e2c" stroke-width="1"/>
+<text x="84" y="356.7" font-size="11.5" text-anchor="end" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">10 ms</text>
+<line x1="96" y1="301.3" x2="894" y2="301.3" stroke="#2e2e2c" stroke-width="1"/>
+<text x="84" y="305.3" font-size="11.5" text-anchor="end" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">100 ms</text>
+<line x1="96" y1="250.0" x2="894" y2="250.0" stroke="#2e2e2c" stroke-width="1"/>
+<text x="84" y="254.0" font-size="11.5" text-anchor="end" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 s</text>
+<line x1="96" y1="198.7" x2="894" y2="198.7" stroke="#2e2e2c" stroke-width="1"/>
+<text x="84" y="202.7" font-size="11.5" text-anchor="end" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">10 s</text>
+<line x1="96" y1="147.3" x2="894" y2="147.3" stroke="#2e2e2c" stroke-width="1"/>
+<text x="84" y="151.3" font-size="11.5" text-anchor="end" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">100 s</text>
+<line x1="96" y1="96.0" x2="894" y2="96.0" stroke="#2e2e2c" stroke-width="1"/>
+<text x="84" y="100.0" font-size="11.5" text-anchor="end" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1000 s</text>
+<line x1="96" y1="404" x2="894" y2="404" stroke="#454541" stroke-width="1"/>
+<line x1="125.6" y1="404" x2="125.6" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="125.6" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">128 nt</text>
+<line x1="231.1" y1="404" x2="231.1" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="231.1" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">256 nt</text>
+<line x1="336.7" y1="404" x2="336.7" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="336.7" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">512 nt</text>
+<line x1="442.2" y1="404" x2="442.2" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="442.2" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 Knt</text>
+<line x1="547.8" y1="404" x2="547.8" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="547.8" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">2 Knt</text>
+<line x1="653.3" y1="404" x2="653.3" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="653.3" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4 Knt</text>
+<line x1="758.9" y1="404" x2="758.9" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="758.9" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">8 Knt</text>
+<line x1="864.4" y1="404" x2="864.4" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="864.4" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">16 Knt</text>
+<text x="495" y="448" font-size="12" text-anchor="middle" fill="#c3c2b7">sequence length, nucleotide bases</text>
+<text x="20" y="250" font-size="12" text-anchor="middle" fill="#c3c2b7" transform="rotate(-90 20 250)">wall clock</text>
+<line x1="786.0" y1="378.0" x2="878.0" y2="337.6" stroke="#8a8980" stroke-width="1.5" stroke-dasharray="4 4" stroke-linecap="round"/>
+<text x="874.0" y="328.6" font-size="12.5" text-anchor="end" fill="#8a8980">n³</text>
+<path d="M125.6,387.5 L231.1,370.8 L336.7,352.7 L442.2,332.1 L547.8,307.0 L653.3,270.8 L758.9,228.9 L864.4,184.9" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="387.5" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="231.1" cy="370.8" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="336.7" cy="352.7" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="442.2" cy="332.1" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="547.8" cy="307.0" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="653.3" cy="270.8" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="758.9" cy="228.9" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="864.4" cy="184.9" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<path d="M125.6,360.3 L231.1,323.4 L336.7,285.7 L442.2,241.9 L547.8,193.0" fill="none" stroke="#d95926" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="360.3" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="231.1" cy="323.4" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="336.7" cy="285.7" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="442.2" cy="241.9" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="547.8" cy="193.0" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="442.2" cy="208.5" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<path d="M125.6,316.8 L231.1,316.8 L336.7,280.9 L442.2,252.4 L547.8,219.5 L653.3,186.0 L758.9,147.5 L864.4,108.3" fill="none" stroke="#c98500" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="316.8" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="231.1" cy="316.8" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="336.7" cy="280.9" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="442.2" cy="252.4" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="547.8" cy="219.5" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="653.3" cy="186.0" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="758.9" cy="147.5" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="864.4" cy="108.3" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<path d="M125.6,299.2 L231.1,285.9 L336.7,250.0 L442.2,208.5 L547.8,163.9" fill="none" stroke="#199e70" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="299.2" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="231.1" cy="285.9" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="336.7" cy="250.0" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="442.2" cy="208.5" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="547.8" cy="163.9" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="100" cy="472" r="4" fill="#3987e5"/>
+<text x="111" y="476" font-size="12.5" fill="#c3c2b7">AffineGaps, H100</text>
+<circle cx="245.8" cy="472" r="4" fill="#d95926"/>
+<text x="256.8" y="476" font-size="12.5" fill="#c3c2b7">AffineGaps, 1xSPR</text>
+<circle cx="404.7" cy="472" r="4" fill="#199e70"/>
+<text x="415.7" y="476" font-size="12.5" fill="#c3c2b7">RNAstructure Fold, 1xSPR</text>
+<circle cx="609.45" cy="472" r="4" fill="#c98500"/>
+<text x="620.45" y="476" font-size="12.5" fill="#c3c2b7">ViennaRNA RNAfold, 1xSPR</text>
+</svg>
