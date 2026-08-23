@@ -22,8 +22,23 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 dependencies = ["numpy"]
-description = "Needleman-Wunsch and Smith-Waterman with affine gaps, scoring and traceback, on GPUs"
-keywords = ["bioinformatics", "sequence alignment", "rna", "gpu", "affine gaps", "mojo"]
+description = "Exact biosequence alignment and folding on GPUs — Needleman-Wunsch, Smith-Waterman, Levenshtein, Zuker, and Sankoff with Gotoh adjustments and traceback"
+keywords = [
+  "bioinformatics",
+  "sequence alignment",
+  "needleman-wunsch",
+  "smith-waterman",
+  "levenshtein",
+  "gotoh",
+  "zuker",
+  "sankoff",
+  "rna",
+  "rna secondary structure",
+  "dynamic programming",
+  "gpu",
+  "affine gaps",
+  "mojo",
+]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 name = "affinegaps"
@@ -88,6 +103,7 @@ include = [
   "turner.py",
   "README.md",
   "LICENSE",
+  "CITATION.cff",
 ]
 
 [tool.hatch.build.targets.wheel]

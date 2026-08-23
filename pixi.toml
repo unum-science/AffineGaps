@@ -1,7 +1,7 @@
 [workspace]
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
 channels = ["conda-forge", "https://conda.modular.com/max", "https://repo.prefix.dev/modular-community"]
-description = "Needleman-Wunsch and Smith-Waterman with affine gaps, scoring and traceback, on GPUs"
+description = "Exact biosequence alignment and folding on GPUs — Needleman-Wunsch, Smith-Waterman, Levenshtein, Zuker, and Sankoff with Gotoh adjustments and traceback"
 license = "Apache-2.0"
 license-file = "LICENSE"
 name = "affinegaps"

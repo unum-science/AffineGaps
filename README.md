@@ -478,3 +478,20 @@ Three groups, one per module, each naming what the tool does and where this diff
 
 Every tool in the last group approximates.
 This one does not, which is what makes it useful to them: an exact answer at a few hundred bases is the oracle a band can be measured against.
+
+## Citation
+
+If AffineGaps helps your research or product, please cite it:
+
+```bibtex
+@software{Vardanian_AffineGaps,
+  author = {Vardanian, Ash},
+  title = {{AffineGaps: Exact biosequence alignment and folding on GPUs — Needleman-Wunsch, Smith-Waterman, Levenshtein, Zuker, and Sankoff with Gotoh adjustments and traceback}},
+  doi = {10.5281/zenodo.22045581},
+  url = {https://github.com/unum-science/AffineGaps},
+  license = {Apache-2.0}
+}
+```
+
+That is the concept DOI, so it resolves to whichever release is newest.
+`CITATION.cff` carries it alongside the DOI minted for the specific version, for when a paper needs to name the exact code it ran.

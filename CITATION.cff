@@ -1,0 +1,57 @@
+cff-version: 1.2.0
+title: >-
+  AffineGaps: Exact biosequence alignment and folding on GPUs —
+  Needleman-Wunsch, Smith-Waterman, Levenshtein, Zuker, and Sankoff with Gotoh adjustments and traceback
+message: "If you use this software, please cite it as below."
+type: software
+license: Apache-2.0
+version: 0.2.5
+doi: 10.5281/zenodo.22045581
+repository-code: https://github.com/unum-science/AffineGaps
+url: https://github.com/unum-science/AffineGaps
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.22045582
+    description: "v0.2.5 — version DOI"
+abstract: >-
+  Exact biosequence dynamic programming is thought too slow to run at scale, but the cost was never
+  the arithmetic — it is the dependency structure of the natural traversal. Filling a matrix row by
+  row makes every cell wait on its neighbour, an order no hardware can widen. Sweeping anti-diagonals
+  instead leaves a whole front independent; folding sweeps by span and cofolding by window length,
+  collapsing a sextic recurrence into a few hundred dependent layers with full parallelism inside
+  each. AffineGaps carries that reordering through to the GPU, so the exact optimum arrives at speeds
+  usually reserved for heuristics.
+
+  It covers Needleman-Wunsch and Smith-Waterman under Gotoh's affine gap model, Levenshtein edit
+  distance, Zuker minimum free energy folding over the Turner tables, and Sankoff's simultaneous
+  alignment and folding of two RNA sequences, each reconstructing its traceback rather than a score
+  alone. Alignment does so in linear memory; Sankoff provably cannot, which bounds it to short
+  sequences and makes it the oracle the banded approximations are measured against.
+keywords:
+  - bioinformatics
+  - sequence-alignment
+  - needleman-wunsch
+  - smith-waterman
+  - levenshtein
+  - gotoh
+  - zuker
+  - sankoff
+  - rna-secondary-structure
+  - dynamic-programming
+  - gpu
+  - mojo
+
+authors:
+  - family-names: Vardanian
+    given-names: Ash
+    alias: ashvardanian
+    orcid: https://orcid.org/0000-0002-4882-1815
+
+references:
+  - type: blog
+    title: "Processing Strings 109x Faster than Nvidia on H100"
+    authors:
+      - family-names: Vardanian
+        given-names: Ash
+    url: https://ashvardanian.com/posts/stringwars-on-gpus/
+    year: 2025

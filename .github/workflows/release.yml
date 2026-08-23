@@ -33,6 +33,7 @@ jobs:
           verbose: "true"
           version-file: "VERSION"
           update-version-in: |
+            CITATION.cff:^version: (\d+\.\d+\.\d+)
             pyproject.toml:^version = "(\d+\.\d+\.\d+)"
             pixi.toml:^version = "(\d+\.\d+\.\d+)"
             affinegaps.py:^__version__ = "(\d+\.\d+\.\d+)"
