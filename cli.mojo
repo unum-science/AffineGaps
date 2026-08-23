@@ -20,12 +20,22 @@ from std.time import perf_counter_ns
 from max.gpu.host import DeviceContext
 
 from alignment import (
-    AffineGapCosts, AlignmentMode, DEFAULT_GAP_EXTENSION, DEFAULT_GAP_OPENING, colorize,
-    default_proteins_matrix, serial_align,
+    AffineGapCosts,
+    AlignmentMode,
+    DEFAULT_GAP_EXTENSION,
+    DEFAULT_GAP_OPENING,
+    colorize,
+    default_proteins_matrix,
+    serial_align,
 )
 from cofolding import SankoffScoring, device_cofold, serial_cofold
 from common import (
-    DEFAULT_PROTEINS_ALPHABET, DEFAULT_RNA_ALPHABET, Executor, Placement, hardware_threads, translate,
+    DEFAULT_PROTEINS_ALPHABET,
+    DEFAULT_RNA_ALPHABET,
+    Executor,
+    Placement,
+    hardware_threads,
+    translate,
     uniform_matrix,
 )
 from errors import AffineGapsError, ErrorKind
@@ -232,6 +242,7 @@ def shared_flag(flag: String, value: String, mut options: Options) raises Affine
         return 2
     return 0
 
+
 # endregion Options
 
 # region Reporting
@@ -240,6 +251,18 @@ def shared_flag(flag: String, value: String, mut options: Options) raises Affine
 def quote(text: String) -> String:
     """A JSON string. Every value reaching here is alphabet-checked or dot-bracket, so no escaping."""
     return String('"', text, '"')
+
+
+def rounded(value: Float64, places: Int) -> String:
+    """A float at a fixed number of decimals, because the default spelling prints every digit it has."""
+    var scale = Float64(10) ** places
+    var whole = Int(value)
+    var fraction = Int(round((value - Float64(whole)) * scale))
+    if fraction >= Int(scale):
+        whole += 1
+        fraction -= Int(scale)
+    var digits = String(fraction)
+    return String(whole, ".", "0" * (places - digits.byte_length()), digits)
 
 
 def report_placement(placement: Placement, options: Options, cells: Int, nanoseconds: Int):
@@ -256,8 +279,9 @@ def report_placement(placement: Placement, options: Options, cells: Int, nanosec
     var rate = Float64(cells) / seconds / 1e6 if seconds > 0 else 0.0
     print("  backend:     mojo on ", device, sep="", file=errors)
     print("  cells:       ", cells, sep="", file=errors)
-    print("  elapsed:     ", Float64(nanoseconds) / 1e6, " ms", sep="", file=errors)
-    print("  throughput:  ", rate, " MCUPS", sep="", file=errors)
+    print("  elapsed:     ", rounded(Float64(nanoseconds) / 1e6, 3), " ms", sep="", file=errors)
+    print("  throughput:  ", rounded(rate, 2), " MCUPS", sep="", file=errors)
+
 
 # endregion Reporting
 
@@ -337,17 +361,49 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
     if options.format == Format.JSON:
         print(
             "{",
-            quote("operation"), ": ", quote("align"), ", ",
-            quote("mode"), ": ", quote("local" if mode_is_local else "global"), ", ",
-            quote("first"), ": ", quote(first_text), ", ",
-            quote("second"), ": ", quote(second_text), ", ",
-            quote("first_gapped"), ": ", quote(result.first_gapped), ", ",
-            quote("second_gapped"), ": ", quote(result.second_gapped), ", ",
-            quote("score"), ": ", Int(result.score), ", ",
-            quote("backend"), ": ", quote("mojo"), ", ",
-            quote("device"), ": ", quote("gpu" if placement.executor == Executor.DEVICE else "cpu"), ", ",
-            quote("gpu_id"), ": ", placement.gpu_id, ", ",
-            quote("threads"), ": ", placement.threads,
+            quote("operation"),
+            ": ",
+            quote("align"),
+            ", ",
+            quote("mode"),
+            ": ",
+            quote("local" if mode_is_local else "global"),
+            ", ",
+            quote("first"),
+            ": ",
+            quote(first_text),
+            ", ",
+            quote("second"),
+            ": ",
+            quote(second_text),
+            ", ",
+            quote("first_gapped"),
+            ": ",
+            quote(result.first_gapped),
+            ", ",
+            quote("second_gapped"),
+            ": ",
+            quote(result.second_gapped),
+            ", ",
+            quote("score"),
+            ": ",
+            Int(result.score),
+            ", ",
+            quote("backend"),
+            ": ",
+            quote("mojo"),
+            ", ",
+            quote("device"),
+            ": ",
+            quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+            ", ",
+            quote("gpu_id"),
+            ": ",
+            placement.gpu_id,
+            ", ",
+            quote("threads"),
+            ": ",
+            placement.threads,
             "}",
             sep="",
         )
@@ -400,13 +456,33 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
     if options.format == Format.JSON:
         print(
             "{",
-            quote("operation"), ": ", quote("fold"), ", ",
-            quote("sequence"), ": ", quote(sequence_text), ", ",
-            quote("structure"), ": ", quote(outcome.structure), ", ",
-            quote("energy_kcal_per_mol"), ": ", energy, ", ",
-            quote("backend"), ": ", quote("mojo"), ", ",
-            quote("device"), ": ", quote("gpu" if placement.executor == Executor.DEVICE else "cpu"), ", ",
-            quote("gpu_id"), ": ", placement.gpu_id,
+            quote("operation"),
+            ": ",
+            quote("fold"),
+            ", ",
+            quote("sequence"),
+            ": ",
+            quote(sequence_text),
+            ", ",
+            quote("structure"),
+            ": ",
+            quote(outcome.structure),
+            ", ",
+            quote("energy_kcal_per_mol"),
+            ": ",
+            energy,
+            ", ",
+            quote("backend"),
+            ": ",
+            quote("mojo"),
+            ", ",
+            quote("device"),
+            ": ",
+            quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+            ", ",
+            quote("gpu_id"),
+            ": ",
+            placement.gpu_id,
             "}",
             sep="",
         )
@@ -462,8 +538,13 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
     var scoring = SankoffScoring(Int32(gap))
     var started = perf_counter_ns()
     var outcome = device_cofold(
-        DeviceContext(device_id=placement.gpu_id), first_text, second_text, alphabet, scoring,
-        match_score, mismatch_score,
+        DeviceContext(device_id=placement.gpu_id),
+        first_text,
+        second_text,
+        alphabet,
+        scoring,
+        match_score,
+        mismatch_score,
     ) if placement.executor == Executor.DEVICE else serial_cofold(
         first_text, second_text, alphabet, scoring, match_score, mismatch_score
     )
@@ -472,16 +553,45 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
     if options.format == Format.JSON:
         print(
             "{",
-            quote("operation"), ": ", quote("cofold"), ", ",
-            quote("first"), ": ", quote(first_text), ", ",
-            quote("second"), ": ", quote(second_text), ", ",
-            quote("first_gapped"), ": ", quote(outcome.gapped_first), ", ",
-            quote("second_gapped"), ": ", quote(outcome.gapped_second), ", ",
-            quote("structure"), ": ", quote(outcome.structure), ", ",
-            quote("score"), ": ", Int(outcome.score), ", ",
-            quote("backend"), ": ", quote("mojo"), ", ",
-            quote("device"), ": ", quote("gpu" if placement.executor == Executor.DEVICE else "cpu"), ", ",
-            quote("gpu_id"), ": ", placement.gpu_id,
+            quote("operation"),
+            ": ",
+            quote("cofold"),
+            ", ",
+            quote("first"),
+            ": ",
+            quote(first_text),
+            ", ",
+            quote("second"),
+            ": ",
+            quote(second_text),
+            ", ",
+            quote("first_gapped"),
+            ": ",
+            quote(outcome.gapped_first),
+            ", ",
+            quote("second_gapped"),
+            ": ",
+            quote(outcome.gapped_second),
+            ", ",
+            quote("structure"),
+            ": ",
+            quote(outcome.structure),
+            ", ",
+            quote("score"),
+            ": ",
+            Int(outcome.score),
+            ", ",
+            quote("backend"),
+            ": ",
+            quote("mojo"),
+            ", ",
+            quote("device"),
+            ": ",
+            quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+            ", ",
+            quote("gpu_id"),
+            ": ",
+            placement.gpu_id,
             "}",
             sep="",
         )
@@ -495,6 +605,7 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
         var cells = first_text.byte_length() * second_text.byte_length()
         report_placement(placement, options, cells * cells, elapsed)
     return 0
+
 
 # endregion Verbs
 

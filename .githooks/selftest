@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#
+# AffineGaps git-hook selftest - every check gets a fixture that must be rejected, and the hooks get
+# a fixture that must pass untouched. A check that stops firing is a rule that silently disappeared;
+# a check that fires on the clean fixture is a rule nobody will keep enabled. Both fail here.
+#
+# Run with:  .githooks/selftest
+
+set -u
+
+hooks_dir=$(cd "$(dirname "$0")" && pwd)
+scratch="${AFFINEGAPS_SELFTEST_DIR:-${TMPDIR:-/tmp}/affinegaps-githooks-selftest}"
+rm -rf "$scratch"
+mkdir -p "$scratch"
+
+passed=0
+failed=0
+
+report() { # report <outcome> <name>
+    if [ "$1" = "ok" ]; then
+        passed=$((passed + 1))
+        echo "  ok      $2"
+    else
+        failed=$((failed + 1))
+        echo "  FAILED  $2"
+    fi
+}
+
+# A throwaway repository, so the hooks run against a real index rather than a mock.
+new_repo() {
+    local dir="$scratch/$1"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    git -C "$dir" init -q
+    git -C "$dir" config user.email selftest@example.com
+    git -C "$dir" config user.name Selftest
+    git -C "$dir" config core.hooksPath "$hooks_dir"
+    echo "$dir"
+}
+
+# expects <name> <reject|accept> <file> <content>
+expects() {
+    local name=$1 verdict=$2 file=$3 content=$4
+    local dir
+    dir=$(new_repo "case-$name")
+    mkdir -p "$dir/$(dirname "$file")"
+    printf '%s\n' "$content" > "$dir/$file"
+    git -C "$dir" add -A
+    if git -C "$dir" commit -q -m "Add: a fixture" > /dev/null 2>&1; then
+        [ "$verdict" = accept ] && report ok "$name" || report no "$name (accepted, should reject)"
+    else
+        [ "$verdict" = reject ] && report ok "$name" || report no "$name (rejected, should accept)"
+    fi
+}
+
+echo "pre-commit:"
+expects backticked-complexity reject notes.md 'Memory is `O(n^2)` here.'
+expects math-complexity       accept notes.md 'Memory is $O(n^2)$ here.'
+expects comment-ruler         reject thing.py '# ==== Section ===='
+expects region-marker         accept thing.py '# region Section'
+expects superscript-jammed    reject table.md '| tool | 2.36s · 467G¹ |'
+expects superscript-spaced    accept table.md '| tool | 2.36s · 467G ¹ |'
+
+echo "commit-msg:"
+# subject <name> <reject|accept> <subject>
+subject() {
+    local name=$1 verdict=$2 text=$3
+    local dir
+    dir=$(new_repo "msg-$name")
+    printf 'content\n' > "$dir/file.txt"
+    git -C "$dir" add -A
+    if git -C "$dir" commit -q -m "$text" > /dev/null 2>&1; then
+        [ "$verdict" = accept ] && report ok "$name" || report no "$name (accepted, should reject)"
+    else
+        [ "$verdict" = reject ] && report ok "$name" || report no "$name (rejected, should accept)"
+    fi
+}
+subject sanctioned-verb   accept "Improve: something that existed"
+subject refactor-verb     reject "Refactor: there is no such verb"
+subject lowercase-verb    reject "improve: not capitalised"
+subject no-verb           reject "just a sentence"
+subject claude-trailer    reject "Add: a thing
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+
+echo
+echo "$passed passed, $failed failed"
+[ "$failed" -eq 0 ]

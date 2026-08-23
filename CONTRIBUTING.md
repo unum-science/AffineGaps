@@ -1,5 +1,7 @@
 # Contributing to Affine Gaps
 
+## Getting Started
+
 To test, install the development dependencies and run the tests.
 
 ```bash
@@ -16,7 +18,21 @@ uv pip install --group test .   # To install the package and its test dependenci
 uv run pytest test.py           # To run the tests
 ```
 
-### Testing the Mojo Backend
+## House Style
+
+Arm the hooks once per clone, before the first commit:
+
+```sh
+pixi run hooks    # git config core.hooksPath .githooks
+pixi run format   # mojo format -l 120 *.mojo
+```
+
+`pre-commit` gates `mojo format`, `black` and `ruff` on the staged tree, plus three prose rules: big-O written as `$O(n^2)$` rather than backticked, no decorative comment rulers, and a space before every footnote glyph in a Markdown table.
+`commit-msg` holds the subject to `Fix:`, `Add:`, `Improve:`, `Chore:`, `Make:`, `Docs:` or `Break:`.
+The Mojo gate fails closed when the formatter cannot be resolved, because outside the pixi environment `mojo format` warns, changes nothing and still exits zero.
+`.githooks/selftest` gives every check a fixture that must be rejected and one that must pass, so a rule that stops firing fails the suite rather than disappearing quietly.
+
+## Testing the Mojo Backend
 
 The GPU kernels are optional. Build them with `pixi run build` and the same suite picks them up; without a build, every Mojo test skips and the pure-Python suite still runs.
 
@@ -29,6 +45,8 @@ Every property test runs against each backend, named `python-cpu`, `numba-cpu`, 
 A backend the machine cannot serve is skipped rather than failed, and the skip reason carries the real cause — a missing build and an unsupported driver are different problems and say so.
 
 The Mojo kernels and the Python reference are held to the same recurrence, the same border initialization and the same tie-breaking, so the suite compares them exhaustively rather than by sampling — every pair of sequences up to length five over a three-letter alphabet, both global and local, on the host and on the device.
+
+## Properties Under Test
 
 ### Every Path Must Achieve Its Own Score
 
@@ -89,7 +107,7 @@ Perform a fuzzy comparison of affine gap alignment scores with BioPython for ran
 pytest test.py -s -x -k biopython_fuzzy
 ```
 
-### EMBOSS and Other Tools
+## EMBOSS and Other Tools
 
 Seemingly the only correct known open-source implementation is located in `nucleus/embaln.c` file in the EMBOSS package in the `embAlignPathCalcWithEndGapPenalties` and `embAlignGetScoreNWMatrix` functions.
 That program was originally [implemented in 1999 by Alan Bleasby](https://www.bioinformatics.nl/cgi-bin/emboss/help/needle) and tweaked in 2000 for better scoring.

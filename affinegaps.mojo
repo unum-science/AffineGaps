@@ -28,8 +28,17 @@ from std.python.bindings import PythonModuleBuilder
 from max.gpu.host import DeviceContext
 
 from common import (
-    DEFAULT_PROTEINS_ALPHABET, DEFAULT_RNA_ALPHABET, Executor, FALLBACK_LETTER, OFFSET_DTYPE,
-    Placement, SCORE_DTYPE, SUBSTITUTION_DTYPE, SYMBOL_DTYPE, hardware_threads, translate,
+    DEFAULT_PROTEINS_ALPHABET,
+    DEFAULT_RNA_ALPHABET,
+    Executor,
+    FALLBACK_LETTER,
+    OFFSET_DTYPE,
+    Placement,
+    SCORE_DTYPE,
+    SUBSTITUTION_DTYPE,
+    SYMBOL_DTYPE,
+    hardware_threads,
+    translate,
     uniform_matrix,
 )
 from errors import AffineGapsError, ErrorKind
@@ -44,11 +53,33 @@ from cofolding import (
     serial_cofold,
 )
 from alignment import (
-    ALL_MODES, AffineGapCosts, AlignmentMode, DEFAULT_GAP_EXTENSION, DEFAULT_GAP_OPENING,
-    DEFAULT_TILE_CELLS, DEVICE_STORED_CELLS, GapRun, Layer, MAX_BAND_LENGTH,
-    Sweep, SweepBuffers, SweepHalf, colorize, default_proteins_matrix, device_local_extremum,
-    direct_alignments, expand_path, hirschberg_path_gpu, hirschberg_window, local_extremum, score_path,
-    serial_align, serial_score, sweep_buffers, sweep_level, wavefront_scores,
+    ALL_MODES,
+    AffineGapCosts,
+    AlignmentMode,
+    DEFAULT_GAP_EXTENSION,
+    DEFAULT_GAP_OPENING,
+    DEFAULT_TILE_CELLS,
+    DEVICE_STORED_CELLS,
+    GapRun,
+    Layer,
+    MAX_BAND_LENGTH,
+    Sweep,
+    SweepBuffers,
+    SweepHalf,
+    colorize,
+    default_proteins_matrix,
+    device_local_extremum,
+    device_alignments,
+    expand_path,
+    device_hirschberg,
+    serial_hirschberg,
+    serial_local_extremum,
+    score_path,
+    serial_align,
+    serial_score,
+    device_sweep_buffers,
+    device_sweep_level,
+    device_scores,
 )
 
 # region Python Bindings
@@ -192,7 +223,7 @@ def gotoh_scores_batch[
     var tape = pack_batch(firsts, seconds, alphabet)
 
     var ctx = DeviceContext(device_id=placement.gpu_id)
-    var scores = wavefront_scores[mode](ctx, tape.sequences, tape.offsets, substitutions, alphabet_size, scoring)
+    var scores = device_scores[mode](ctx, tape.sequences, tape.offsets, substitutions, alphabet_size, scoring)
     var output = Python().list()
     for index in range(len(scores)):
         output.append(PythonObject(Int(scores[index])))
@@ -224,7 +255,7 @@ def gotoh_alignments_batch[
     var tape = pack_batch(firsts, seconds, alphabet)
 
     var ctx = DeviceContext(device_id=placement.gpu_id)
-    var aligned = direct_alignments[mode](ctx, tape.sequences, tape.offsets, substitutions, alphabet, scoring)
+    var aligned = device_alignments[mode](ctx, tape.sequences, tape.offsets, substitutions, alphabet, scoring)
     var output = Python().list()
     for index in range(len(aligned)):
         var triple = alignment_triple(aligned[index].first_gapped, aligned[index].second_gapped, aligned[index].score)
@@ -368,7 +399,7 @@ def needleman_wunsch_gotoh_alignment_linear(
 
     var path_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
     var path_entries = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
-    hirschberg_window(
+    serial_hirschberg(
         left,
         right,
         0,
@@ -405,7 +436,7 @@ def needleman_wunsch_gotoh_alignment_linear_gpu(
     var path_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
     var path_entries = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
     var ctx = DeviceContext(device_id=placement.gpu_id)
-    hirschberg_path_gpu(
+    device_hirschberg(
         ctx,
         left,
         right,
@@ -417,7 +448,7 @@ def needleman_wunsch_gotoh_alignment_linear_gpu(
         alphabet_size,
         scoring,
         cells,
-        placement.threads,
+        placement,
         path_columns,
         path_entries,
     )
@@ -451,7 +482,7 @@ def smith_waterman_gotoh_alignment_linear(
     var left = translate(String(first), alphabet)
     var right = translate(String(second), alphabet)
 
-    var last_row, last_column, score = local_extremum[SweepHalf.FORWARD](
+    var last_row, last_column, score = serial_local_extremum[SweepHalf.FORWARD](
         left, right, len(left), len(right), substitutions, alphabet_size, scoring
     )
 
@@ -460,7 +491,7 @@ def smith_waterman_gotoh_alignment_linear(
 
     var first_row = last_row
     if score > 0:
-        var back_rows, back_columns, _ = local_extremum[SweepHalf.REVERSE](
+        var back_rows, back_columns, _ = serial_local_extremum[SweepHalf.REVERSE](
             left, right, last_row, last_column, substitutions, alphabet_size, scoring
         )
         first_row = last_row - back_rows
@@ -472,7 +503,7 @@ def smith_waterman_gotoh_alignment_linear(
         for index in range(len(path_columns)):
             core_columns[index] = path_columns[index]
             core_entries[index] = path_entries[index]
-        hirschberg_window(
+        serial_hirschberg(
             left,
             right,
             first_row,
@@ -496,6 +527,7 @@ def smith_waterman_gotoh_alignment_linear(
     var triple = alignment_triple(expanded[0], expanded[1], score)
     return triple
 
+
 def smith_waterman_gotoh_alignment_linear_gpu(
     first: PythonObject,
     second: PythonObject,
@@ -515,7 +547,7 @@ def smith_waterman_gotoh_alignment_linear_gpu(
     sequences.extend(Span(right))
 
     var ctx = DeviceContext(device_id=placement.gpu_id)
-    var buffers = sweep_buffers(ctx, len(left), len(right), Span(sequences), substitutions)
+    var buffers = device_sweep_buffers(ctx, len(left), len(right), Span(sequences), substitutions)
     var last_row, last_column, score = device_local_extremum[SweepHalf.FORWARD](
         ctx, buffers, len(left), len(left), len(right), alphabet_size, scoring
     )
@@ -532,7 +564,7 @@ def smith_waterman_gotoh_alignment_linear_gpu(
         var first_column = last_column - back_columns
 
         path_columns[last_row] = Int32(last_column)
-        hirschberg_path_gpu(
+        device_hirschberg(
             ctx,
             left,
             right,
@@ -544,7 +576,7 @@ def smith_waterman_gotoh_alignment_linear_gpu(
             alphabet_size,
             scoring,
             cells,
-            placement.threads,
+            placement,
             path_columns,
             path_entries,
         )
@@ -708,7 +740,9 @@ def gotoh_alignments(
         comptime for index in range(len(ALL_MODES)):
             comptime candidate = ALL_MODES[index]
             if requested_mode == candidate:
-                var aligned = gotoh_alignments_batch[candidate](batch_firsts, batch_seconds, substitution, gaps, placement)
+                var aligned = gotoh_alignments_batch[candidate](
+                    batch_firsts, batch_seconds, substitution, gaps, placement
+                )
                 for slot in range(len(batchable)):
                     results[batchable[slot]] = aligned[slot]
                     placed[batchable[slot]] = True

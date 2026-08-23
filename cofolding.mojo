@@ -31,9 +31,20 @@ from max.gpu.host import DeviceContext
 
 from errors import AffineGapsError, ErrorKind
 from common import (
-    CLOSE_BYTE, DEFAULT_RNA_ALPHABET, GAP_BYTE, NEGATIVE_INFINITY, OPEN_BYTE, SCORE_DTYPE,
-    SUBSTITUTION_DTYPE, SYMBOL_DTYPE, THREADS_PER_BLOCK, UNPAIRED_BYTE, translate, uniform_matrix,
-    upload, zeroed,
+    CLOSE_BYTE,
+    DEFAULT_RNA_ALPHABET,
+    GAP_BYTE,
+    NEGATIVE_INFINITY,
+    OPEN_BYTE,
+    SCORE_DTYPE,
+    SUBSTITUTION_DTYPE,
+    SYMBOL_DTYPE,
+    THREADS_PER_BLOCK,
+    UNPAIRED_BYTE,
+    translate,
+    uniform_matrix,
+    upload,
+    zeroed,
 )
 
 # region Scoring
@@ -90,41 +101,21 @@ def read_neighbours(
     var paired_inner = Int32(0)
     if length_first >= 2 and length_second >= 2:
         paired_inner = table[
-            unsafe_offset = cell_index(
+            unsafe_offset=cell_index(
                 start_first + 1, length_first - 2, start_second + 1, length_second - 2, rows, columns
             )
         ]
     return Neighbours(
         table[
-            unsafe_offset = cell_index(
+            unsafe_offset=cell_index(
                 start_first + 1, length_first - 1, start_second + 1, length_second - 1, rows, columns
             )
         ],
-        table[
-            unsafe_offset = cell_index(
-                start_first, length_first - 1, start_second, length_second - 1, rows, columns
-            )
-        ],
-        table[
-            unsafe_offset = cell_index(
-                start_first + 1, length_first - 1, start_second, length_second, rows, columns
-            )
-        ],
-        table[
-            unsafe_offset = cell_index(
-                start_first, length_first, start_second + 1, length_second - 1, rows, columns
-            )
-        ],
-        table[
-            unsafe_offset = cell_index(
-                start_first, length_first - 1, start_second, length_second, rows, columns
-            )
-        ],
-        table[
-            unsafe_offset = cell_index(
-                start_first, length_first, start_second, length_second - 1, rows, columns
-            )
-        ],
+        table[unsafe_offset=cell_index(start_first, length_first - 1, start_second, length_second - 1, rows, columns)],
+        table[unsafe_offset=cell_index(start_first + 1, length_first - 1, start_second, length_second, rows, columns)],
+        table[unsafe_offset=cell_index(start_first, length_first, start_second + 1, length_second - 1, rows, columns)],
+        table[unsafe_offset=cell_index(start_first, length_first - 1, start_second, length_second, rows, columns)],
+        table[unsafe_offset=cell_index(start_first, length_first, start_second, length_second - 1, rows, columns)],
         paired_inner,
     )
 
@@ -155,11 +146,7 @@ def sankoff_cell(
     if length_first >= 2 and length_second >= 2 and closing_first > 0 and closing_second > 0:
         best = max(
             best,
-            neighbours.paired_inner
-            + closing_first
-            + closing_second
-            + head_substitution
-            + tail_substitution,
+            neighbours.paired_inner + closing_first + closing_second + head_substitution + tail_substitution,
         )
     return best
 
@@ -176,6 +163,7 @@ def cell_index(
 @always_inline
 def table_cells(rows: Int, columns: Int) -> Int:
     return (rows + 1) * (rows + 1) * (columns + 1) * (columns + 1)
+
 
 # endregion Scoring
 
@@ -219,9 +207,7 @@ def cofold_cell(
         closing_first = Int32(pairs[head_first * alphabet_size + tail_first])
         closing_second = Int32(pairs[head_second * alphabet_size + tail_second])
 
-    var neighbours = read_neighbours(
-        table, start_first, length_first, start_second, length_second, rows, columns
-    )
+    var neighbours = read_neighbours(table, start_first, length_first, start_second, length_second, rows, columns)
     var best = sankoff_cell(
         neighbours,
         Int32(substitutions[head_first * alphabet_size + head_second]),
@@ -249,11 +235,9 @@ def bifurcation_best(
     var best = NEGATIVE_INFINITY
     for cut_first in range(1, length_first):
         for cut_second in range(1, length_second):
-            var left = table[
-                unsafe_offset = cell_index(start_first, cut_first, start_second, cut_second, rows, columns)
-            ]
+            var left = table[unsafe_offset=cell_index(start_first, cut_first, start_second, cut_second, rows, columns)]
             var right = table[
-                unsafe_offset = cell_index(
+                unsafe_offset=cell_index(
                     start_first + cut_first,
                     length_first - cut_first,
                     start_second + cut_second,
@@ -290,14 +274,22 @@ def serial_cofold_table(
                 continue
             for start_first in range(rows - length_first + 1):
                 for start_second in range(columns - length_second + 1):
-                    var here = cell_index(
-                        start_first, length_first, start_second, length_second, rows, columns
-                    )
+                    var here = cell_index(start_first, length_first, start_second, length_second, rows, columns)
                     cells[unsafe_offset=here] = cofold_cell(
-                        cells, first, second, substitutions, pairs, alphabet_size, scoring,
-                        start_first, length_first, start_second, length_second,
+                        cells,
+                        first,
+                        second,
+                        substitutions,
+                        pairs,
+                        alphabet_size,
+                        scoring,
+                        start_first,
+                        length_first,
+                        start_second,
+                        length_second,
                     )
     return table^
+
 
 # endregion Serial Reference
 
@@ -313,14 +305,14 @@ def block_max(
 
     Every thread holds the answer afterwards, which saves the caller a second barrier.
     """
-    reduction[unsafe_offset = Int(thread_idx.x)] = best
+    reduction[unsafe_offset=Int(thread_idx.x)] = best
     barrier()
     var span = THREADS_PER_BLOCK // 2
     while span > 0:
         if Int(thread_idx.x) < span:
-            reduction[unsafe_offset = Int(thread_idx.x)] = max(
-                reduction[unsafe_offset = Int(thread_idx.x)],
-                reduction[unsafe_offset = Int(thread_idx.x) + span],
+            reduction[unsafe_offset=Int(thread_idx.x)] = max(
+                reduction[unsafe_offset=Int(thread_idx.x)],
+                reduction[unsafe_offset=Int(thread_idx.x) + span],
             )
         barrier()
         span //= 2
@@ -358,9 +350,7 @@ def cofold_layer_kernel(
     if start_first + length_first > rows or start_second + length_second > columns:
         return
 
-    var reduction = stack_allocation[
-        THREADS_PER_BLOCK, Scalar[SCORE_DTYPE], address_space = AddressSpace.SHARED
-    ]()
+    var reduction = stack_allocation[THREADS_PER_BLOCK, Scalar[SCORE_DTYPE], address_space=AddressSpace.SHARED]()
     var here = cell_index(start_first, length_first, start_second, length_second, rows, columns)
     var scoring = SankoffScoring(gap)
 
@@ -383,21 +373,19 @@ def cofold_layer_kernel(
     if thread_idx.x == 0:
         var head_first = Int(first[unsafe_offset=start_first])
         var head_second = Int(second[unsafe_offset=start_second])
-        var tail_first = Int(first[unsafe_offset = start_first + length_first - 1])
-        var tail_second = Int(second[unsafe_offset = start_second + length_second - 1])
+        var tail_first = Int(first[unsafe_offset=start_first + length_first - 1])
+        var tail_second = Int(second[unsafe_offset=start_second + length_second - 1])
 
         var closing_first = Int32(0)
         var closing_second = Int32(0)
         if length_first >= 2 and length_second >= 2:
-            closing_first = Int32(pairs[unsafe_offset = head_first * width + tail_first])
-            closing_second = Int32(pairs[unsafe_offset = head_second * width + tail_second])
-        var neighbours = read_neighbours(
-            table, start_first, length_first, start_second, length_second, rows, columns
-        )
+            closing_first = Int32(pairs[unsafe_offset=head_first * width + tail_first])
+            closing_second = Int32(pairs[unsafe_offset=head_second * width + tail_second])
+        var neighbours = read_neighbours(table, start_first, length_first, start_second, length_second, rows, columns)
         best = sankoff_cell(
             neighbours,
-            Int32(substitutions[unsafe_offset = head_first * width + head_second]),
-            Int32(substitutions[unsafe_offset = tail_first * width + tail_second]),
+            Int32(substitutions[unsafe_offset=head_first * width + head_second]),
+            Int32(substitutions[unsafe_offset=tail_first * width + tail_second]),
             closing_first,
             closing_second,
             length_first,
@@ -411,13 +399,9 @@ def cofold_layer_kernel(
         for flat in range(Int(thread_idx.x), split_count, THREADS_PER_BLOCK):
             var cut_first = flat // splits_second + 1
             var cut_second = flat % splits_second + 1
-            var left = table[
-                unsafe_offset = cell_index(
-                    start_first, cut_first, start_second, cut_second, rows, columns
-                )
-            ]
+            var left = table[unsafe_offset=cell_index(start_first, cut_first, start_second, cut_second, rows, columns)]
             var right = table[
-                unsafe_offset = cell_index(
+                unsafe_offset=cell_index(
                     start_first + cut_first,
                     length_first - cut_first,
                     start_second + cut_second,
@@ -484,9 +468,11 @@ def device_cofold_table(
     ctx.synchronize()
     return table^
 
+
 # endregion GPU Sweep
 
 # region Traceback
+
 
 @fieldwise_init
 struct SankoffCase(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
@@ -572,16 +558,11 @@ def winning_case(
         var closing_first = Int32(pairs[head_first * alphabet_size + tail_first])
         var closing_second = Int32(pairs[head_second * alphabet_size + tail_second])
         if closing_first > 0 and closing_second > 0:
-            if (
-                near.paired_inner + closing_first + closing_second + head_substitution + tail_substitution
-                == stored
-            ):
+            if near.paired_inner + closing_first + closing_second + head_substitution + tail_substitution == stored:
                 return Decision(SankoffCase.PAIRED, 0, 0)
         for cut_first in range(1, length_first):
             for cut_second in range(1, length_second):
-                var left = table[
-                    cell_index(start_first, cut_first, start_second, cut_second, rows, columns)
-                ]
+                var left = table[cell_index(start_first, cut_first, start_second, cut_second, rows, columns)]
                 var right = table[
                     cell_index(
                         start_first + cut_first,
@@ -635,8 +616,17 @@ def expand_window(
         return
 
     var decision = winning_case(
-        table, first, second, substitutions, pairs, alphabet_size, scoring,
-        start_first, length_first, start_second, length_second,
+        table,
+        first,
+        second,
+        substitutions,
+        pairs,
+        alphabet_size,
+        scoring,
+        start_first,
+        length_first,
+        start_second,
+        length_second,
     )
     var head_first = letters[Int(first[start_first])]
     var head_second = letters[Int(second[start_second])]
@@ -648,36 +638,84 @@ def expand_window(
         gapped_second.append(head_second)
         structure.append(UNPAIRED_BYTE)
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first + 1, length_first - 1, start_second + 1, length_second - 1,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first + 1,
+            length_first - 1,
+            start_second + 1,
+            length_second - 1,
+            gapped_first,
+            gapped_second,
+            structure,
         )
     elif decision.outcome == SankoffCase.HEAD_GAP_IN_SECOND:
         gapped_first.append(head_first)
         gapped_second.append(GAP_BYTE)
         structure.append(UNPAIRED_BYTE)
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first + 1, length_first - 1, start_second, length_second,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first + 1,
+            length_first - 1,
+            start_second,
+            length_second,
+            gapped_first,
+            gapped_second,
+            structure,
         )
     elif decision.outcome == SankoffCase.HEAD_GAP_IN_FIRST:
         gapped_first.append(GAP_BYTE)
         gapped_second.append(head_second)
         structure.append(UNPAIRED_BYTE)
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first, length_first, start_second + 1, length_second - 1,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first,
+            length_first,
+            start_second + 1,
+            length_second - 1,
+            gapped_first,
+            gapped_second,
+            structure,
         )
     elif decision.outcome == SankoffCase.PAIRED:
         gapped_first.append(head_first)
         gapped_second.append(head_second)
         structure.append(OPEN_BYTE)
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first + 1, length_first - 2, start_second + 1, length_second - 2,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first + 1,
+            length_first - 2,
+            start_second + 1,
+            length_second - 2,
+            gapped_first,
+            gapped_second,
+            structure,
         )
         gapped_first.append(tail_first)
         gapped_second.append(tail_second)
@@ -686,43 +724,103 @@ def expand_window(
         var cut_first = Int(decision.cut_first)
         var cut_second = Int(decision.cut_second)
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first, cut_first, start_second, cut_second,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first,
+            cut_first,
+            start_second,
+            cut_second,
+            gapped_first,
+            gapped_second,
+            structure,
         )
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first + cut_first, length_first - cut_first,
-            start_second + cut_second, length_second - cut_second,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first + cut_first,
+            length_first - cut_first,
+            start_second + cut_second,
+            length_second - cut_second,
+            gapped_first,
+            gapped_second,
+            structure,
         )
     elif decision.outcome == SankoffCase.TAIL_ALIGNED:
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first, length_first - 1, start_second, length_second - 1,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first,
+            length_first - 1,
+            start_second,
+            length_second - 1,
+            gapped_first,
+            gapped_second,
+            structure,
         )
         gapped_first.append(tail_first)
         gapped_second.append(tail_second)
         structure.append(UNPAIRED_BYTE)
     elif decision.outcome == SankoffCase.TAIL_GAP_IN_SECOND:
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first, length_first - 1, start_second, length_second,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first,
+            length_first - 1,
+            start_second,
+            length_second,
+            gapped_first,
+            gapped_second,
+            structure,
         )
         gapped_first.append(tail_first)
         gapped_second.append(GAP_BYTE)
         structure.append(UNPAIRED_BYTE)
     else:
         expand_window(
-            table, first, second, substitutions, pairs, letters, alphabet_size, scoring,
-            start_first, length_first, start_second, length_second - 1,
-            gapped_first, gapped_second, structure,
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            letters,
+            alphabet_size,
+            scoring,
+            start_first,
+            length_first,
+            start_second,
+            length_second - 1,
+            gapped_first,
+            gapped_second,
+            structure,
         )
         gapped_first.append(GAP_BYTE)
         gapped_second.append(tail_second)
         structure.append(UNPAIRED_BYTE)
+
 
 # endregion Traceback
 
@@ -782,8 +880,21 @@ def cofold_from_table(
     var gapped_second = List[Byte]()
     var structure = List[Byte]()
     expand_window(
-        table, first, second, substitutions, pairs, letters, alphabet.byte_length(), scoring,
-        0, rows, 0, columns, gapped_first, gapped_second, structure,
+        table,
+        first,
+        second,
+        substitutions,
+        pairs,
+        letters,
+        alphabet.byte_length(),
+        scoring,
+        0,
+        rows,
+        0,
+        columns,
+        gapped_first,
+        gapped_second,
+        structure,
     )
     return CofoldResult(
         String(unsafe_from_utf8=gapped_first),
@@ -838,5 +949,6 @@ def device_cofold(
     return cofold_from_table(
         Span(table), Span(first), Span(second), Span(substitutions), Span(pairs), alphabet, scoring
     )
+
 
 # endregion Interface

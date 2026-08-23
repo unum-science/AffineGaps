@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#
+# AffineGaps commit-msg hook - holds the subject line to the sanctioned verbs and keeps assistant
+# attribution out of the history.
+
+set -u
+LC_ALL=C
+
+message_file=$1
+subject=$(sed -n '1p' "$message_file")
+failed=0
+
+# The verbs this repository actually uses, taken from its own log. `Fix:` for a defect, `Add:` for
+# something that did not exist, `Improve:` for anything that did exist and got better - refactors
+# included, since there is no `Refactor:`. `Chore:` for housekeeping that removes or rearranges,
+# `Make:` for the build, `Docs:` for prose that drifted on its own, `Break:` for a change that
+# breaks a published surface. `Release:` and `Merge:` are written by automation.
+case "$subject" in
+    "Fix: "* | "Add: "* | "Improve: "* | "Chore: "* | "Make: "* | "Docs: "* | "Break: "*) ;;
+    "Release: "* | "Merge: "* | "Revert "* | "fixup! "* | "squash! "*) ;;
+    *)
+        echo "commit-msg: the subject must start with one of the sanctioned verbs." >&2
+        echo "commit-msg:   Fix: Add: Improve: Chore: Make: Docs: Break:" >&2
+        echo "commit-msg: there is no 'Refactor:' - a refactor is an Improve:." >&2
+        echo "commit-msg: got: $subject" >&2
+        failed=1
+        ;;
+esac
+
+# The harness appends these by default and they are not wanted in this history.
+attribution=$(grep -inE 'co-authored-by:.*(claude|anthropic)|generated with \[?claude|Claude-Session:' "$message_file" || true)
+if [ -n "$attribution" ]; then
+    echo "commit-msg: assistant attribution must not appear in the message." >&2
+    printf '%s\n' "$attribution" >&2
+    failed=1
+fi
+
+exit $failed

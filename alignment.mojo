@@ -36,8 +36,20 @@ from max.gpu.primitives import block
 
 from errors import AffineGapsError, ErrorKind
 from common import (
-    GAP_BYTE, MAX_ALPHABET_SIZE, NEGATIVE_INFINITY, OFFSET_DTYPE, SCORE_DTYPE, SUBSTITUTION_DTYPE,
-    SYMBOL_DTYPE, THREADS_PER_BLOCK, max_dynamic_shared, shared_per_block, translate, upload, zeroed,
+    GAP_BYTE,
+    MAX_ALPHABET_SIZE,
+    NEGATIVE_INFINITY,
+    OFFSET_DTYPE,
+    Placement,
+    SCORE_DTYPE,
+    SUBSTITUTION_DTYPE,
+    SYMBOL_DTYPE,
+    THREADS_PER_BLOCK,
+    max_dynamic_shared,
+    shared_per_block,
+    translate,
+    upload,
+    zeroed,
 )
 
 # region Scoring
@@ -69,6 +81,7 @@ A strip carries the score and insertion layers of the column to its left, one en
 long a first sequence one block can take.
 """
 comptime MAX_BAND_LENGTH = (MAX_DYNAMIC_SHARED - STATIC_SHARED_USED) // (CARRY_BANDS * 4) - 1
+
 
 @fieldwise_init
 struct Layer(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
@@ -173,8 +186,6 @@ def default_proteins_matrix() -> List[Scalar[SUBSTITUTION_DTYPE]]:
     for index in range(529):
         matrix.append(table[index])
     return matrix^
-
-
 
 
 @fieldwise_init
@@ -846,7 +857,7 @@ def best_crossing(
     return best
 
 
-def hirschberg_window(
+def serial_hirschberg(
     first: ImmSpan[Scalar[SYMBOL_DTYPE], _],
     second: ImmSpan[Scalar[SYMBOL_DTYPE], _],
     window_first_from: Int,
@@ -1051,7 +1062,7 @@ def expand_path(
     return (String(unsafe_from_utf8=left), String(unsafe_from_utf8=right))
 
 
-def local_extremum[
+def serial_local_extremum[
     half: SweepHalf
 ](
     first: ImmSpan[Scalar[SYMBOL_DTYPE], _],
@@ -1149,7 +1160,7 @@ def block_argmax(
         span //= 2
 
 
-def wavefront_scores[
+def device_scores[
     mode: AlignmentMode
 ](
     ctx: DeviceContext,
@@ -1455,7 +1466,7 @@ def strip_pair_kernel[
     gapped_lengths[unsafe_offset=pair] = Int32(produced)
 
 
-def direct_alignments[
+def device_alignments[
     mode: AlignmentMode
 ](
     ctx: DeviceContext,
@@ -1524,10 +1535,7 @@ def direct_alignments[
     ctx.synchronize()
 
     var aligned = List[AlignmentResult](capacity=pairs)
-    with results_buffer.map_to_host() as scores_host, \
-        lengths_buffer.map_to_host() as lengths_host, \
-        first_buffer.map_to_host() as first_host, \
-        second_buffer.map_to_host() as second_host:
+    with results_buffer.map_to_host() as scores_host, lengths_buffer.map_to_host() as lengths_host, first_buffer.map_to_host() as first_host, second_buffer.map_to_host() as second_host:
         for pair in range(pairs):
             var produced = Int(lengths_host[pair])
             var base = pair * widest
@@ -1546,7 +1554,7 @@ def direct_alignments[
     return aligned^
 
 
-def hirschberg_path_gpu(
+def device_hirschberg(
     ctx: DeviceContext,
     first: ImmSpan[Scalar[SYMBOL_DTYPE], _],
     second: ImmSpan[Scalar[SYMBOL_DTYPE], _],
@@ -1558,7 +1566,7 @@ def hirschberg_path_gpu(
     alphabet_size: Int,
     scoring: AffineGapCosts,
     tile_cells: Int,
-    threads: Int,
+    placement: Placement,
     path_columns: MutSpan[Int32, _],
     path_entries: MutSpan[Layer, _],
 ) raises:
@@ -1582,7 +1590,7 @@ def hirschberg_path_gpu(
     for index in range(columns):
         sequences.append(second[index])
 
-    var buffers = sweep_buffers(ctx, rows, columns, Span(sequences), substitutions)
+    var buffers = device_sweep_buffers(ctx, rows, columns, Span(sequences), substitutions)
 
     var frames = List[Frame]()
     frames.append(
@@ -1631,7 +1639,7 @@ def hirschberg_path_gpu(
                     path_entries,
                 )
 
-            parallelize[solve_leaf](len(leaves), threads)
+            parallelize[solve_leaf](len(leaves), placement.threads)
         else:
             for slot in range(len(leaves)):
                 tile_frame(
@@ -1681,7 +1689,7 @@ def hirschberg_path_gpu(
             )
             joins[index * 3 + 2] = Scalar[SCORE_DTYPE](width)
 
-        sweep_level[AlignmentMode.GLOBAL](ctx, buffers, sweeps, alphabet_size, scoring)
+        device_sweep_level[AlignmentMode.GLOBAL](ctx, buffers, sweeps, alphabet_size, scoring)
 
         for index in range(len(splitting)):
             joins[index * 3] = Scalar[SCORE_DTYPE](sweeps[index * 2].column_base)
@@ -2087,7 +2095,7 @@ struct SweepBuffers(Movable):
     """How many blocks the scan reduces over."""
 
 
-def sweep_buffers(
+def device_sweep_buffers(
     ctx: DeviceContext,
     rows: Int,
     columns: Int,
@@ -2256,7 +2264,7 @@ def device_local_extremum[
     # scan, so anything left from an earlier one would be read as a candidate.
     ctx.enqueue_memset(buffers.block_best, Scalar[SCORE_DTYPE](0))
     ctx.enqueue_memset(buffers.block_place, Scalar[DType.int64](0))
-    sweep_level[AlignmentMode.LOCAL](ctx, buffers, sweeps, alphabet_size, scoring)
+    device_sweep_level[AlignmentMode.LOCAL](ctx, buffers, sweeps, alphabet_size, scoring)
 
     var best = Int32(0)
     var best_place = Int64(0)
@@ -2271,7 +2279,7 @@ def device_local_extremum[
     return (Int(best_place // stride), Int(best_place % stride), best)
 
 
-def sweep_level[
+def device_sweep_level[
     mode: AlignmentMode
 ](
     ctx: DeviceContext,
@@ -2328,9 +2336,18 @@ def sweep_level[
         raise AffineGapsError(
             ErrorKind.SCRATCH_TOO_SMALL,
             String(
-                "corner ", corner_base, "/", buffers.corner_span,
-                " left ", left_base, "/", buffers.left_span,
-                " top ", top_base, "/", buffers.frontier_span,
+                "corner ",
+                corner_base,
+                "/",
+                buffers.corner_span,
+                " left ",
+                left_base,
+                "/",
+                buffers.left_span,
+                " top ",
+                top_base,
+                "/",
+                buffers.frontier_span,
             ),
         )
 

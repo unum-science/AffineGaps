@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+#
+# AffineGaps pre-commit hook - house-style guards over the staged tree.
+# Install once per clone with:  pixi run hooks
+# Bypass in a genuine emergency with:  git commit --no-verify
+#
+# Every check runs and reports independently, and the hook exits once at the end. A commit that
+# trips three rules shows all three, so the author fixes them in one pass instead of being rejected
+# three times in a row. Each check carries its own rationale, so this file is the rulebook.
+#
+# The hooks directory is exempt from every content scan: a hook has to spell out the patterns it
+# bans, so scanning it would flag the rule text rather than a violation of the rule.
+
+set -u
+LC_ALL=C
+
+failed=0
+
+# Prints the headline, the offending lines, and the remedy, then marks the commit rejected.
+fail() { # fail <matches> <headline> <remedy-line>...
+    local matches=$1
+    shift
+    local line
+    for line in "$@"; do echo "pre-commit: $line" >&2; done
+    printf '%s' "$matches" | head -5 >&2
+    failed=1
+}
+
+# region Staged Set
+
+staged=()
+while IFS= read -r path; do
+    case "$path" in .githooks/*) continue ;; esac
+    [ -f "$path" ] || continue
+    grep -Iq . "$path" 2> /dev/null || continue
+    staged+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+[ ${#staged[@]} -gt 0 ] || exit 0
+
+mojo_staged=()
+python_staged=()
+for path in "${staged[@]}"; do
+    case "$path" in
+        *.mojo) mojo_staged+=("$path") ;;
+        *.py) python_staged+=("$path") ;;
+    esac
+done
+
+# endregion Staged Set
+
+# region Prose
+
+# Big-O belongs in math delimiters so it renders, in Markdown and in docstrings alike. A backticked
+# `O(n^2)` shows the caret raw and reads as code rather than as a complexity.
+check_backticked_complexity() {
+    local hits
+    hits=$(git grep --cached -nE '`O\([^`]*\)`' -- "${staged[@]}" || true)
+    [ -z "$hits" ] || fail "$hits"$'\n' \
+        "big-O is written as math, not code." \
+        "            Write \$O(n^2)\$ rather than \`O(n^2)\`."
+}
+
+# Decorative separators carry no information the sentence beneath them does not already carry.
+# Sections are named with `# region` / `# endregion`, which editors fold.
+check_rulers() {
+    local hits
+    hits=$(git grep --cached -nE '^[[:space:]]*(#|//|\*)[[:space:]]*[-=]{4,}' -- "${staged[@]}" || true)
+    [ -z "$hits" ] || fail "$hits"$'\n' \
+        "a decorative comment separator was added." \
+        "            Name the section with '# region <name>' instead of a ruler."
+}
+
+# A footnote glyph in a Markdown table cell is a reference mark, not a unit suffix. Pushed against
+# the number it reads as part of the value, so it always keeps a space before it.
+check_superscript_spacing() {
+    local hits
+    hits=$(git grep --cached -nE '^\|.*[0-9A-Za-z][¹²³⁴⁵⁶⁷⁸⁹]' -- '*.md' || true)
+    [ -z "$hits" ] || fail "$hits"$'\n' \
+        "a table footnote glyph is jammed against its value." \
+        "            Write '467G ¹', not '467G¹', and compute column widths afterwards."
+}
+
+# endregion Prose
+
+# region Toolchain Gates
+
+# `mojo format` is the law, but it has no --check mode, so format a copy and diff. It also resolves
+# only inside the pixi environment: outside it, it prints a warning, changes nothing and exits zero,
+# which would turn this gate into a rubber stamp. So the resolution is verified before it is trusted.
+check_mojo_format() {
+    [ ${#mojo_staged[@]} -gt 0 ] || return 0
+    if ! command -v pixi > /dev/null 2>&1; then
+        fail "" "pixi is not on PATH, so 'mojo format' cannot be verified." \
+            "            Install pixi, or commit with --no-verify and format by hand."
+        return 0
+    fi
+    if ! pixi run -q mojo format --help > /dev/null 2>&1; then
+        fail "" "the Mojo formatter does not resolve, so this gate cannot run." \
+            "            Run 'pixi install'. Never trust a silent pass here."
+        return 0
+    fi
+    local scratch dirty=""
+    scratch=$(mktemp -d)
+    for path in "${mojo_staged[@]}"; do
+        git show ":$path" > "$scratch/probe.mojo"
+        pixi run -q mojo format -q -l 120 "$scratch/probe.mojo" > /dev/null 2>&1
+        git show ":$path" | diff -q - "$scratch/probe.mojo" > /dev/null 2>&1 || dirty="$dirty  $path"$'\n'
+    done
+    rm -rf "$scratch"
+    [ -z "$dirty" ] || fail "$dirty" \
+        "staged Mojo is not formatter-clean." \
+        "            Run: pixi run mojo format -l 120 *.mojo"
+}
+
+# Python matches what `pixi run lint` enforces, so the hook and CI cannot disagree.
+check_python_format() {
+    [ ${#python_staged[@]} -gt 0 ] || return 0
+    command -v uvx > /dev/null 2>&1 || return 0
+    local hits
+    hits=$(uvx black --line-length 120 --check "${python_staged[@]}" 2>&1 | grep '^would reformat' || true)
+    [ -z "$hits" ] || fail "$hits"$'\n' \
+        "staged Python is not black-clean." \
+        "            Run: uvx black --line-length 120 *.py"
+    hits=$(uvx ruff check "${python_staged[@]}" 2>&1 | grep -E '^[^ ].*:[0-9]+:[0-9]+:' || true)
+    [ -z "$hits" ] || fail "$hits"$'\n' \
+        "staged Python does not pass ruff." \
+        "            Run: uvx ruff check --fix *.py"
+}
+
+# endregion Toolchain Gates
+
+check_backticked_complexity
+check_rulers
+check_superscript_spacing
+check_mojo_format
+check_python_format
+
+[ $failed -eq 0 ] || echo "pre-commit: rejected. Fix the above, or bypass with --no-verify." >&2
+exit $failed

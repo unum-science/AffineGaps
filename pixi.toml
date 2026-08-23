@@ -48,8 +48,11 @@ PYTHONNOUSERSITE = "1"
 
 [tasks]
 # Sibling modules resolve from the same directory, so each artifact names only its own root.
-build = "mojo build affinegaps.mojo --emit shared-lib -o build/affinegaps_mojo.so"
-build-cli = "mojo build cli.mojo -o build/affinegaps"
+# `$MOJO_ACCELERATOR` is empty locally, so the host's own GPU is detected; CI names one instead.
+build = "mojo build affinegaps.mojo --emit shared-lib -o build/affinegaps_mojo.so $MOJO_ACCELERATOR"
+build-cli = "mojo build cli.mojo -o build/affinegaps $MOJO_ACCELERATOR"
+format = "mojo format -l 120 *.mojo"
+hooks = "git config core.hooksPath .githooks"
 test = {cmd = "pytest test.py", depends-on = ["build"]}
 
 # The checkers need this environment's interpreter to resolve NumPy and NumBa; that belongs here

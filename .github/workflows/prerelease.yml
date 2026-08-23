@@ -67,14 +67,21 @@ jobs:
         run: mypy
 
   # A hosted runner has no GPU, so this compiles without executing, on all three Mojo platforms.
+  # Naming the accelerator is what makes that possible: with none attached, `_accelerator_arch()`
+  # yields something `GPUInfo.from_name` rejects and the kernels fail to compile at all. Pinning it
+  # here rather than in `pixi.toml` leaves a developer's own machine detecting its own card, and
+  # covers both fleet targets rather than whichever one the runner guessed.
   build_mojo:
-    name: Mojo Compiles (${{ matrix.os }})
+    name: Mojo Compiles (${{ matrix.os }}, ${{ matrix.accelerator }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
+        accelerator: [sm_90a, sm_100a]
+    env:
+      MOJO_ACCELERATOR: --target-accelerator ${{ matrix.accelerator }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
