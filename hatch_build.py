@@ -18,8 +18,6 @@ import tempfile
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
-sys.path.insert(0, str(pathlib.Path(__file__).parent / "scripts"))
-
 
 class MojoExtensionHook(BuildHookInterface):
     PLUGIN_NAME = "mojo"
@@ -30,15 +28,10 @@ class MojoExtensionHook(BuildHookInterface):
         except ImportError:
             return  # No toolchain for this platform, so ship the reference alone.
 
-        from build_extension import library_source
-
         source = pathlib.Path(self.root) / "affinegaps.mojo"
         staging = pathlib.Path(tempfile.mkdtemp(prefix="affinegaps-"))
-        stripped = staging / "affinegaps.mojo"
-        stripped.write_text(library_source(source.read_text()))
-
         extension = staging / self._extension_name()
-        outcome = subprocess_run_mojo(["build", str(stripped), "--emit", "shared-lib", "-o", str(extension)])
+        outcome = subprocess_run_mojo(["build", str(source), "--emit", "shared-lib", "-o", str(extension)])
         if outcome.returncode != 0 or not extension.exists():
             return
 

@@ -161,3 +161,7 @@ cython_debug/
 
 # Pixi environments for the Mojo package
 .pixi/
+
+# Datasets live on the shared filesystem; only the placeholder is tracked.
+data/*
+!data/.gitkeep

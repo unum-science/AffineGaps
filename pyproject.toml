@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = ["numpy"]
 description = "Needleman-Wunsch and Smith-Waterman with affine gaps, scoring and traceback, on GPUs"
-keywords = ["bioinformatics", "sequence alignment", "gpu", "affine gaps", "mojo"]
+keywords = ["bioinformatics", "sequence alignment", "rna", "gpu", "affine gaps", "mojo"]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 name = "affinegaps"
@@ -41,7 +41,7 @@ numba = ["numba"]
 
 # A group rather than an extra, so the checkers stay out of the published wheel's metadata.
 [dependency-groups]
-lint = ["ruff>=0.15", "black>=26", "mypy>=2", "numpy"]
+lint = ["ruff>=0.15", "black>=26", "mypy>=2", "pyright>=1.1", "numpy"]
 test = ["biopython", "stringzilla", "pytest", "pytest-repeat"]
 
 [tool.pytest.ini_options]
@@ -58,17 +58,40 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "UP", "SIM", "RUF"]
 
+# Pylance reads this section, not `[tool.mypy]`, so both checkers need telling separately.
+[tool.pyright]
+include = ["affinegaps.py", "alignment.py", "cofolding.py", "common.py", "folding.py", "turner.py", "test.py"]
+# NumBa and colorama are optional at runtime and ship no type stubs.
+pythonVersion = "3.12"
+reportMissingModuleSource = "none"
+
 [tool.mypy]
-files = ["affinegaps.py"] 
+files = ["affinegaps.py", "alignment.py", "cofolding.py", "common.py", "folding.py", "turner.py"] 
 ignore_missing_imports = true # NumBa and colorama are optional at runtime
 python_version = "3.12" 
 
 # Without an explicit target hatchling sweeps the Mojo sources and the test file into the sdist.
 [tool.hatch.build.targets.sdist]
-include = ["affinegaps.py", "affinegaps.mojo", "scripts", "README.md", "LICENSE"]
+include = [
+  "alignment.py",
+  "common.py",
+  "affinegaps.py",
+  "affinegaps.mojo",
+  "alignment.mojo",
+  "cli.mojo",
+  "cofolding.mojo",
+  "cofolding.py",
+  "common.mojo",
+  "folding.mojo",
+  "folding.py",
+  "turner.mojo",
+  "turner.py",
+  "README.md",
+  "LICENSE",
+]
 
 [tool.hatch.build.targets.wheel]
-include = ["affinegaps.py"]
+include = ["affinegaps.py", "alignment.py", "cofolding.py", "common.py", "folding.py", "turner.py"]
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"

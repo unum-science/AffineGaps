@@ -47,10 +47,18 @@ default = ["color", "numba", "lint", "test"]
 PYTHONNOUSERSITE = "1"
 
 [tasks]
-# Mojo refuses to emit a shared library from a file defining `main`, so the region is stripped first.
-build = "python scripts/build_extension.py"
-build-cli = "mojo build affinegaps.mojo -o build/affinegaps"
+# Sibling modules resolve from the same directory, so each artifact names only its own root.
+build = "mojo build affinegaps.mojo --emit shared-lib -o build/affinegaps_mojo.so"
+build-cli = "mojo build cli.mojo -o build/affinegaps"
 test = {cmd = "pytest test.py", depends-on = ["build"]}
+
+# The checkers need this environment's interpreter to resolve NumPy and NumBa; that belongs here
+# rather than as a hardcoded path in the package metadata.
+lint = """
+uvx ruff check *.py &&
+uvx black --line-length 120 --check *.py &&
+uvx pyright --pythonpath .pixi/envs/default/bin/python
+"""
 
 # The build hook compiles the kernels into the wheel, so this needs no `build` step of its own.
 install = "uv tool install --force ."
