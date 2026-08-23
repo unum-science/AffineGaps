@@ -55,11 +55,11 @@ from functools import cache, lru_cache
 from typing import Any
 
 from alignment import (
-    _needleman_wunsch_gotoh_kernel,
-    _needleman_wunsch_gotoh_score_kernel,
+    _needleman_wunsch_gotoh_recurrence,
+    _needleman_wunsch_gotoh_score_recurrence,
     _reconstruct_alignment,
-    _smith_waterman_gotoh_kernel,
-    _smith_waterman_gotoh_score_kernel,
+    _smith_waterman_gotoh_recurrence,
+    _smith_waterman_gotoh_score_recurrence,
     _validate_gotoh_arguments,
     colorize_alignment,
     default_proteins_matrix,
@@ -215,7 +215,7 @@ def available(backend: Backend = Backend.MOJO, device: Device = Device.CPU) -> b
     return True
 
 
-def _kernel(function, backend) -> Any:
+def _callable_for(function, backend) -> Any:
     """The kernel body a backend asks for: NumBa's compiled dispatcher, or the Python it wrapped."""
     return function if backend is Backend.NUMBA else getattr(function, "py_func", function)
 
@@ -358,7 +358,7 @@ def _gotoh_score(
         return int(_compiled_call(algorithm, backend, device, first, second, options))
     alphabet, matrix, opening, extend = _validate_gotoh_arguments(substitution, gaps)
     return int(
-        _kernel(reference, backend)(
+        _callable_for(reference, backend)(
             _translate_sequence(first, alphabet),
             _translate_sequence(second, alphabet),
             substitution_matrix=matrix,
@@ -397,7 +397,7 @@ def needleman_wunsch_gotoh_alignment(
 
     encoded_first = _translate_sequence(first, substitution_alphabet)
     encoded_second = _translate_sequence(second, substitution_alphabet)
-    scores, changes, deletes, inserts = _kernel(_needleman_wunsch_gotoh_kernel, backend)(
+    scores, changes, deletes, inserts = _callable_for(_needleman_wunsch_gotoh_recurrence, backend)(
         encoded_first,
         encoded_second,
         substitution_matrix=substitution_matrix,
@@ -434,7 +434,14 @@ def needleman_wunsch_gotoh_score(
     Needleman-Wunsch global alignment algorithm. Uses less memory than the alignment function.
     """
     return _gotoh_score(
-        Algorithm.GLOBAL_SCORE, _needleman_wunsch_gotoh_score_kernel, first, second, substitution, gaps, backend, device
+        Algorithm.GLOBAL_SCORE,
+        _needleman_wunsch_gotoh_score_recurrence,
+        first,
+        second,
+        substitution,
+        gaps,
+        backend,
+        device,
     )
 
 
@@ -466,7 +473,7 @@ def smith_waterman_gotoh_alignment(
 
     encoded_first = _translate_sequence(first, substitution_alphabet)
     encoded_second = _translate_sequence(second, substitution_alphabet)
-    scores, changes, deletes, inserts, best_place = _kernel(_smith_waterman_gotoh_kernel, backend)(
+    scores, changes, deletes, inserts, best_place = _callable_for(_smith_waterman_gotoh_recurrence, backend)(
         encoded_first,
         encoded_second,
         substitution_matrix=substitution_matrix,
@@ -504,7 +511,14 @@ def smith_waterman_gotoh_score(
     Measures the Smith-Waterman local alignment score using Gotoh's affine gap penalty extensions.
     """
     return _gotoh_score(
-        Algorithm.LOCAL_SCORE, _smith_waterman_gotoh_score_kernel, first, second, substitution, gaps, backend, device
+        Algorithm.LOCAL_SCORE,
+        _smith_waterman_gotoh_score_recurrence,
+        first,
+        second,
+        substitution,
+        gaps,
+        backend,
+        device,
     )
 
 

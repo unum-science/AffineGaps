@@ -44,7 +44,20 @@ AFFINEGAPS_BACKENDS=python-cpu pixi run pytest # the reference alone, which is w
 Every property test runs against each backend, named `python-cpu`, `numba-cpu`, `mojo-cpu` and `mojo-gpu`.
 A backend the machine cannot serve is skipped rather than failed, and the skip reason carries the real cause — a missing build and an unsupported driver are different problems and say so.
 
-The Mojo kernels and the Python reference are held to the same recurrence, the same border initialization and the same tie-breaking, so the suite compares them exhaustively rather than by sampling — every pair of sequences up to length five over a three-letter alphabet, both global and local, on the host and on the device.
+The Mojo kernels and the Python reference are held to the same recurrence, the same border initialization and the same tie-breaking, so the suite compares them exhaustively rather than by sampling — every pair of sequences whose combined length reaches `4 + AFFINEGAPS_SCALE` over a two-letter alphabet, both global and local, on the host and on the device.
+
+## Knobs
+
+Four environment variables shape a run, and the first two are deliberately separate: one is breadth, the other is depth.
+
+| Variable | Default | Meaning |
+| :--- | :--- | :--- |
+| `AFFINEGAPS_REPETITIONS` | `10` | Random draws per randomized test |
+| `AFFINEGAPS_SCALE` | `1` | Multiplier on every exhaustive oracle's budget, and the highest frozen tier re-derived |
+| `AFFINEGAPS_SEED` | unset | Fixes the draws so a failure reproduces |
+| `AFFINEGAPS_BACKENDS` | all four | Narrows the backend axis |
+
+`AFFINEGAPS_REPETITIONS=100 AFFINEGAPS_SCALE=1` is a fuzzing run and `AFFINEGAPS_REPETITIONS=1 AFFINEGAPS_SCALE=4` is a release gate, which is why one number cannot express both.
 
 ## Properties Under Test
 
@@ -52,59 +65,47 @@ The Mojo kernels and the Python reference are held to the same recurrence, the s
 
 The invariant worth knowing about before touching a traceback.
 With affine gaps it is not automatic: a walk that reads only the winning operation at each cell can leave a gap run and re-enter it, paying a second opening penalty the score never did, and the returned strings then score less than the number returned beside them.
-Both implementations walk the match, deletion and insertion layers, and `test_reference_alignment_achieves_its_score` re-scores every returned path to enforce it.
+Both implementations walk the match, deletion and insertion layers, and `test_alignment_achieves_its_score` re-scores every returned path to enforce it.
 
 Local alignment has a second version of the same trap.
 The traceback stops at the first non-positive cell, so the untraced prefixes are outside the alignment and must not be flushed into the result.
 
-Scores are separately checked against brute-force enumeration of every possible alignment for short inputs, which shares no code with the dynamic programming and so catches a recurrence that is self-consistently wrong.
+### Enumeration, Which Is the Oracle That Matters
 
-### Symmetry Test for Needleman-Wunsch
+Every recurrence is checked against enumerating the whole answer space, sharing no algorithm with the thing it checks.
+`test_scores_match_brute_force_enumeration` walks every alignment of every pair up to a combined length of `4 + AFFINEGAPS_SCALE` over a two-letter alphabet.
+`test_fold_matches_brute_force_enumeration` walks every nested structure a sequence admits and scores each one straight off the Turner tables, through a scorer that shares no code with `folding.py`.
 
-First, verify that the Needleman-Wunsch algorithm is symmetric with respect to the argument order, assuming the substitution matrix is symmetric.
+This is the only kind of oracle that can catch a recurrence which is self-consistently wrong on every backend at once, which is exactly what rewriting a recurrence risks.
 
-```bash
-pytest test.py -s -x -k symmetry
-```
+### The Frozen Corpus
 
-### Needleman-Wunsch and Levenshtein Score Equivalence
+`FOLD_CASES` and `COFOLD_CASES` hold answers checked case by case before being written down: the minimum-hairpin boundary, all three special-loop tables, the bulge and interior ladder including both ends of Ninio's cap, a single wobble against a Watson-Crick control, energy ties, a multiloop, and the `MAX_LOOP` boundary on both sides.
+They assert on every backend and cost microseconds; `AFFINEGAPS_SCALE` decides which of them are additionally re-derived by enumeration.
 
-The Needleman-Wunsch alignment score should be equal to the negated Levenshtein distance for specific match/mismatch costs.
+`TURNER_FINGERPRINT` digests every energy table and scalar.
+Edit `turner.py` and that one test fails by name, instead of thirty energies failing at once with no indication why.
 
-```bash
-pytest test.py -s -x -k levenshtein
-```
+### Degenerate Limits
 
-### Alignment vs Scoring Consistency
+Sankoff collapses to two simpler problems, and both answers come from outside this project.
+Give it a pair table where nothing can pair and it is Needleman-Wunsch with linear gaps, which BioPython answers — and the emitted rows must be a member of BioPython's own set of optimal alignments, not merely score the same.
+Give it a gap nobody can afford and a sequence against itself, and it is base-pair maximization scored twice, which an independently written Nussinov answers.
 
-Check that the alignment score is consistent with the scoring function for specific sequences and scoring parameters.
+### Constructions With a Provable Answer
 
-```bash
-pytest test.py -s -x -k scoring_vs_alignment
-```
+A planted stem whose optimum is arithmetic, because each row holds exactly four G and four C, the loop is all A, and no U exists anywhere.
+A forced gap inside an unpairable stretch, which must move the optimum by the gap price and nothing else.
+Gap monotonicity, since a harsher price cannot raise a maximum.
+Concatenation across a spacer as an __inequality__, never an equality: the optimum was observed pairing across the spacer, which the side-by-side solution cannot express.
 
-### Gap Expansion Test
-
-Check the effect of gap expansions on alignment scores. This test ensures that increasing the width of gaps in alignments with zero gap extension penalties does not change the alignment score.
-
-```bash
-pytest test.py -s -x -k gap_expansions
-```
-
-### Comparison with BioPython Examples
-
-Compare the affine gap alignment scores with BioPython for specific sequence pairs and scoring parameters. This test ensures that the Needleman-Wunsch-Gotoh alignment scores are at least as good as BioPython's PairwiseAligner scores.
+### Symmetry, Levenshtein and Gap Expansion
 
 ```bash
-pytest test.py -s -x -k biopython_examples
-```
-
-### Fuzzy Comparison with BioPython
-
-Perform a fuzzy comparison of affine gap alignment scores with BioPython for randomly generated sequences. This test verifies that the Needleman-Wunsch-Gotoh alignment scores are at least as good as BioPython's PairwiseAligner scores for various gap penalties.
-
-```bash
-pytest test.py -s -x -k biopython_fuzzy
+pytest test.py -s -x -k symmetry        # argument order cannot change a score
+pytest test.py -s -x -k levenshtein     # the negated distance, at the matching costs
+pytest test.py -s -x -k gap_expansions  # a free-extension gap cannot change price with its width
+pytest test.py -s -x -k biopython       # every score against BioPython, curated and fuzzed
 ```
 
 ## EMBOSS and Other Tools

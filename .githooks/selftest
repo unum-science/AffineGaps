@@ -60,6 +60,8 @@ expects comment-ruler         reject thing.py '# ==== Section ===='
 expects region-marker         accept thing.py '# region Section'
 expects superscript-jammed    reject table.md '| tool | 2.36s · 467G¹ |'
 expects superscript-spaced    accept table.md '| tool | 2.36s · 467G ¹ |'
+expects raw-ceildiv           reject thing.py 'blocks = (total + width - 1) // width'
+expects helper-ceildiv        accept thing.py 'blocks = ceildiv(total, width)'
 
 echo "commit-msg:"
 # subject <name> <reject|accept> <subject>

@@ -50,7 +50,7 @@ During my exploration of existing implementations, I've noticed several bugs:
 ## Benchmarks
 
 Throughput first, against the same kernels compiled for one CPU core, with third-party tools where one implements the same recurrence.
-Every cell is __wall time · cell-update rate__, and a cell update is one evaluation of the innermost recurrence rather than one entry of the table — `n * m` for alignment, an interior-loop triangle plus two bifurcation scans per span for folding, one helix candidate per window pair for cofolding.
+Every cell is __wall time · cell-update rate__, and a cell update is one evaluation of the innermost recurrence rather than one entry of the table — `n * m` for alignment, an interior-loop triangle plus a partner scan in each of the three unenclosed tables for folding, one helix candidate per window pair for cofolding.
 Counting the work rather than the storage is what lets the same unit describe all three: a rate over table entries would fall with length by construction for the two folding recurrences, which spend $O(n)$ and $O(n^2)$ work per entry.
 
 A dash is a run that did not finish inside five minutes or whose table exceeded a 24 GiB budget.
@@ -85,16 +85,18 @@ Best of three below 4096 and a single run above, every answer checked against th
   <img alt="Folding wall clock against sequence length" src="assets/folding-light.svg">
 </picture>
 
-| Variant             |              128 nt |              256 nt |               512 nt |                1 Knt |                2 Knt |               4 Knt |               8 Knt |                 16 Knt |
-| :------------------ | ------------------: | ------------------: | -------------------: | -------------------: | -------------------: | ------------------: | ------------------: | ---------------------: |
-| AffineGaps, H100    | 2.1 ms · 2.27 GCUPS | 4.4 ms · 4.95 GCUPS | 10.0 ms · 11.0 GCUPS | 25.2 ms · 24.6 GCUPS | 77.7 ms · 50.2 GCUPS | 393 ms · 68.9 GCUPS | 2.58 s · 77.3 GCUPS |    18.6 s · 82.4 GCUPS |
-| AffineGaps, 1xSPR   |  7.1 ms · 675 MCUPS | 37.2 ms · 589 MCUPS |   202 ms · 545 MCUPS |   1.44 s · 430 MCUPS |   12.9 s · 303 MCUPS |                   — |                   — |                      — |
-| ViennaRNA, 1xSPR    |  50.0 ms · 96 MCUPS | 50.0 ms · 438 MCUPS |   250 ms · 440 MCUPS |   900 ms · 687 MCUPS |   3.93 s · 993 MCUPS | 17.7 s · 1.53 GCUPS | 99.6 s · 2.01 GCUPS | 9.6 min · 2.65 GCUPS ¹ |
-| RNAstructure, 1xSPR |   110 ms · 44 MCUPS |  200 ms · 110 MCUPS |   1.00 s · 110 MCUPS |    6.44 s · 96 MCUPS |    47.6 s · 82 MCUPS |                   — |                   — |                      — |
+| Variant             |               128 nt |               256 nt |               512 nt |                1 Knt |                2 Knt |                4 Knt |               8 Knt |                 16 Knt |
+| :------------------ | -------------------: | -------------------: | -------------------: | -------------------: | -------------------: | -------------------: | ------------------: | ---------------------: |
+| AffineGaps, H100    | 1.73 ms · 1.73 GCUPS | 3.59 ms · 4.51 GCUPS | 8.21 ms · 9.95 GCUPS | 21.5 ms · 20.5 GCUPS | 65.1 ms · 40.5 GCUPS |  286 ms · 59.7 GCUPS | 1.98 s · 60.3 GCUPS |    13.1 s · 68.6 GCUPS |
+| AffineGaps, 1xSPR   |  5.82 ms · 514 MCUPS |  32.1 ms · 504 MCUPS |   158 ms · 518 MCUPS |   1.09 s · 404 MCUPS |   6.99 s · 377 MCUPS | 61.7 s · 277 MCUPS ² |                   — |                      — |
+| ViennaRNA, 1xSPR    |   50.0 ms · 60 MCUPS |  50.0 ms · 324 MCUPS |   250 ms · 327 MCUPS |   900 ms · 490 MCUPS |   3.93 s · 671 MCUPS |   17.7 s · 964 MCUPS | 99.6 s · 1.20 GCUPS | 9.6 min · 1.56 GCUPS ¹ |
+| RNAstructure, 1xSPR |    110 ms · 27 MCUPS |    200 ms · 81 MCUPS |    1.00 s · 82 MCUPS |    6.44 s · 68 MCUPS |    47.6 s · 55 MCUPS |                    — |                   — |                      — |
 
 > Measured 23 August 2026, random RNA, Turner 2004 parameters.
 > Columns are sequence lengths in nucleotide "nt" bases.
+> Every row is rated against this project's candidate count, so a third-party clock is normalized to the same work rather than to its own recurrence — compare the clock across rows, and the rate down a row.
 > ¹ Held in 1.45 GiB; time binds, not memory.
+> ² Where one core stops being practical.
 
 ### RNA Cofolding Speed
 
@@ -103,11 +105,11 @@ Best of three below 4096 and a single run above, every answer checked against th
   <img alt="Cofolding wall clock against sequence length" src="assets/cofolding-light.svg">
 </picture>
 
-| Variant             |               24 nt |                32 nt |                48 nt |                64 nt |               96 nt |               128 nt |              192 nt |              256 nt |
-| :------------------ | ------------------: | -------------------: | -------------------: | -------------------: | ------------------: | -------------------: | ------------------: | ------------------: |
-| AffineGaps, H100    | 1.01 ms · 617 MCUPS | 2.43 ms · 1.69 GCUPS | 9.61 ms · 4.26 GCUPS | 29.8 ms · 9.40 GCUPS | 157 ms · 18.0 GCUPS |  539 ms · 25.5 GCUPS | 6.77 s · 27.9 GCUPS | 31.1 s · 31.9 GCUPS |
-| AffineGaps, 1xSPR   | 2.27 ms · 274 MCUPS |  11.2 ms · 368 MCUPS |   128 ms · 320 MCUPS |   1.18 s · 237 MCUPS |  12.0 s · 235 MCUPS | 68.6 s · 201 MCUPS ¹ |                   — |                   — |
-| RNAstructure, 1xSPR |   170 ms · 31 MCUPS |    490 ms · 61 MCUPS |    4.30 s · 79 MCUPS |    22.9 s · 83 MCUPS |  4.5 min · 81 MCUPS |                    — |                   — |                   — |
+| Variant             |                24 nt |                32 nt |                48 nt |                64 nt |                96 nt |               128 nt |              192 nt |              256 nt |
+| :------------------ | -------------------: | -------------------: | -------------------: | -------------------: | -------------------: | -------------------: | ------------------: | ------------------: |
+| AffineGaps, H100    | 0.84 ms · 1.01 GCUPS | 1.25 ms · 3.72 GCUPS | 3.77 ms · 9.99 GCUPS | 11.7 ms · 27.1 GCUPS | 68.5 ms · 49.4 GCUPS |  279 ms · 59.2 GCUPS | 3.94 s · 52.5 GCUPS | 16.9 s · 70.0 GCUPS |
+| AffineGaps, 1xSPR   |  2.63 ms · 323 MCUPS |  11.8 ms · 396 MCUPS |  92.9 ms · 406 MCUPS |   1.07 s · 296 MCUPS |   12.0 s · 282 MCUPS | 62.5 s · 264 MCUPS ¹ |                   — |                   — |
+| RNAstructure, 1xSPR |     170 ms · 5 MCUPS |    490 ms · 10 MCUPS |     4.30 s · 9 MCUPS |    22.9 s · 14 MCUPS |   4.5 min · 13 MCUPS |                    — |                   — |                   — |
 
 > Measured 23 August 2026, random RNA, covariance scoring.
 > Columns are sequence lengths in nucleotide "nt" bases.

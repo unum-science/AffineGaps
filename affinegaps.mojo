@@ -32,11 +32,11 @@ from common import (
     DEFAULT_RNA_ALPHABET,
     Executor,
     FALLBACK_LETTER,
-    OFFSET_DTYPE,
+    OffsetDType,
     Placement,
-    SCORE_DTYPE,
-    SUBSTITUTION_DTYPE,
-    SYMBOL_DTYPE,
+    ScoreDType,
+    SubstitutionDType,
+    SymbolDType,
     hardware_threads,
     translate,
     uniform_matrix,
@@ -58,7 +58,7 @@ from alignment import (
     AlignmentMode,
     DEFAULT_GAP_EXTENSION,
     DEFAULT_GAP_OPENING,
-    DEFAULT_TILE_CELLS,
+    DEFAULT_LEAF_CELLS,
     DEVICE_STORED_CELLS,
     GapRun,
     Layer,
@@ -68,16 +68,14 @@ from alignment import (
     SweepHalf,
     colorize,
     default_proteins_matrix,
-    device_local_extremum,
     device_alignments,
+    device_align,
     expand_path,
-    device_hirschberg,
     serial_hirschberg,
     serial_local_extremum,
     score_path,
     serial_align,
     serial_score,
-    device_sweep_buffers,
     device_sweep_level,
     device_scores,
 )
@@ -101,7 +99,7 @@ def scoring_from(gaps: PythonObject) raises -> AffineGapCosts:
     return AffineGapCosts(Int32(opening), Int32(extension))
 
 
-def matrix_from(substitution: PythonObject, alphabet_size: Int) raises -> List[Scalar[SUBSTITUTION_DTYPE]]:
+def matrix_from(substitution: PythonObject, alphabet_size: Int) raises -> List[Scalar[SubstitutionDType]]:
     """BLOSUM62 unless the caller passed a uniform-cost record.
 
     No record at all means the default table. A tabulated record never reaches here, because the
@@ -168,9 +166,9 @@ def python_length(value: PythonObject) raises -> Int:
 struct BatchTape(Movable):
     """Both sides of a batch on one tape, which is the shape a kernel can take a pointer to."""
 
-    var sequences: List[Scalar[SYMBOL_DTYPE]]
+    var sequences: List[Scalar[SymbolDType]]
     """Every sequence concatenated, first and second of each pair alternating."""
-    var offsets: List[Scalar[OFFSET_DTYPE]]
+    var offsets: List[Scalar[OffsetDType]]
     """Where each sequence begins, so a block can find its own pair."""
 
 
@@ -181,18 +179,18 @@ def pack_batch(firsts: PythonObject, seconds: PythonObject, alphabet: String) ra
     list of them; the offsets are what let a block find its own pair.
     """
     var pairs = paired_length(firsts, seconds)
-    var sequences = List[Scalar[SYMBOL_DTYPE]]()
-    var offsets = List[Scalar[OFFSET_DTYPE]]()
+    var sequences = List[Scalar[SymbolDType]]()
+    var offsets = List[Scalar[OffsetDType]]()
     offsets.append(0)
     for index in range(pairs):
         var left = translate(String(firsts[index]), alphabet)
         if len(left) > MAX_BAND_LENGTH:
             raise AffineGapsError(ErrorKind.SEQUENCE_TOO_LONG, "shared-memory band")
         sequences.extend(left^)
-        offsets.append(Scalar[OFFSET_DTYPE](len(sequences)))
+        offsets.append(Scalar[OffsetDType](len(sequences)))
         var right = translate(String(seconds[index]), alphabet)
         sequences.extend(right^)
-        offsets.append(Scalar[OFFSET_DTYPE](len(sequences)))
+        offsets.append(Scalar[OffsetDType](len(sequences)))
     return BatchTape(sequences^, offsets^)
 
 
@@ -321,16 +319,16 @@ def zuker_fold(sequence: PythonObject, requested: PythonObject) raises -> Python
     """
     var text = String(sequence)
     var placement = placement_from(requested)
-    var outcome: FoldResult
+    var result: FoldResult
     if String(requested.device) == "gpu":
         var ctx = DeviceContext(device_id=placement.gpu_id)
-        outcome = device_fold(ctx, text)
+        result = device_fold(ctx, text)
     else:
-        outcome = serial_fold(text)
+        result = serial_fold(text)
 
     var couple = Python().list()
-    couple.append(PythonObject(outcome.structure))
-    couple.append(PythonObject(Float64(Int(outcome.decikcal)) / 10.0))
+    couple.append(PythonObject(result.structure))
+    couple.append(PythonObject(Float64(Int(result.decikcal)) / 10.0))
     return couple
 
 
@@ -355,18 +353,18 @@ def sankoff_cofold(
     var right = String(second)
 
     var placement = placement_from(requested)
-    var outcome: CofoldResult
+    var result: CofoldResult
     if String(requested.device) == "gpu":
         var ctx = DeviceContext(device_id=placement.gpu_id)
-        outcome = device_cofold(ctx, left, right, alphabet, scoring, match_score, mismatch_score)
+        result = device_cofold(ctx, left, right, alphabet, scoring, match_score, mismatch_score)
     else:
-        outcome = serial_cofold(left, right, alphabet, scoring, match_score, mismatch_score)
+        result = serial_cofold(left, right, alphabet, scoring, match_score, mismatch_score)
 
     var quadruple = Python().list()
-    quadruple.append(PythonObject(outcome.gapped_first))
-    quadruple.append(PythonObject(outcome.gapped_second))
-    quadruple.append(PythonObject(outcome.structure))
-    quadruple.append(PythonObject(Int(outcome.score)))
+    quadruple.append(PythonObject(result.gapped_first))
+    quadruple.append(PythonObject(result.gapped_second))
+    quadruple.append(PythonObject(result.structure))
+    quadruple.append(PythonObject(Int(result.score)))
     return quadruple
 
 
@@ -387,18 +385,18 @@ def needleman_wunsch_gotoh_alignment_linear(
 ) raises -> PythonObject:
     """Global alignment in linear space, splitting rows and joining halves Myers-Miller style.
 
-    `tile_cells` is the only knob: subproblems at or below it are solved outright, above it they
+    `leaf_cells` is the only knob: subproblems at or below it are solved outright, above it they
     are split. Raising it past the whole matrix collapses to a single direct traceback, which is
     what makes the two paths comparable.
     """
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var cells = DEFAULT_TILE_CELLS
+    var cells = DEFAULT_LEAF_CELLS
     var left = translate(String(first), alphabet)
     var right = translate(String(second), alphabet)
 
     var path_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
-    var path_entries = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
+    var path_layers = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
     serial_hirschberg(
         left,
         right,
@@ -411,10 +409,10 @@ def needleman_wunsch_gotoh_alignment_linear(
         scoring,
         cells,
         path_columns,
-        path_entries,
+        path_layers,
     )
-    var score = score_path(left, right, path_columns, path_entries, substitutions, alphabet_size, scoring, len(left))
-    var expanded = expand_path(left, right, path_columns, path_entries, alphabet, AlignmentMode.GLOBAL, 0, len(left))
+    var score = score_path(left, right, path_columns, path_layers, substitutions, alphabet_size, scoring, len(left))
+    var expanded = expand_path(left, right, path_columns, path_layers, alphabet, AlignmentMode.GLOBAL, 0, len(left))
     var triple = alignment_triple(expanded[0], expanded[1], score)
     return triple
 
@@ -429,33 +427,20 @@ def needleman_wunsch_gotoh_alignment_linear_gpu(
     """Global alignment in linear space with every sweep running on the device."""
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var cells = DEFAULT_TILE_CELLS
     var left = translate(String(first), alphabet)
     var right = translate(String(second), alphabet)
-
-    var path_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
-    var path_entries = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
-    var ctx = DeviceContext(device_id=placement.gpu_id)
-    device_hirschberg(
-        ctx,
+    var result = device_align[AlignmentMode.GLOBAL](
+        DeviceContext(device_id=placement.gpu_id),
         left,
         right,
-        0,
-        len(left),
-        0,
-        len(right),
         substitutions,
         alphabet_size,
         scoring,
-        cells,
+        alphabet,
+        DEFAULT_LEAF_CELLS,
         placement,
-        path_columns,
-        path_entries,
     )
-    var score = score_path(left, right, path_columns, path_entries, substitutions, alphabet_size, scoring, len(left))
-    var expanded = expand_path(left, right, path_columns, path_entries, alphabet, AlignmentMode.GLOBAL, 0, len(left))
-    var triple = alignment_triple(expanded[0], expanded[1], score)
-    return triple
+    return alignment_triple(result.first_gapped, result.second_gapped, result.score)
 
 
 def smith_waterman_gotoh_alignment_linear(
@@ -478,7 +463,7 @@ def smith_waterman_gotoh_alignment_linear(
     """
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var cells = DEFAULT_TILE_CELLS
+    var cells = DEFAULT_LEAF_CELLS
     var left = translate(String(first), alphabet)
     var right = translate(String(second), alphabet)
 
@@ -487,7 +472,7 @@ def smith_waterman_gotoh_alignment_linear(
     )
 
     var path_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
-    var path_entries = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
+    var path_layers = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
 
     var first_row = last_row
     if score > 0:
@@ -499,10 +484,10 @@ def smith_waterman_gotoh_alignment_linear(
 
         path_columns[last_row] = Int32(last_column)
         var core_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
-        var core_entries = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
+        var core_layers = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
         for index in range(len(path_columns)):
             core_columns[index] = path_columns[index]
-            core_entries[index] = path_entries[index]
+            core_layers[index] = path_layers[index]
         serial_hirschberg(
             left,
             right,
@@ -515,14 +500,14 @@ def smith_waterman_gotoh_alignment_linear(
             scoring,
             cells,
             core_columns,
-            core_entries,
+            core_layers,
         )
         for index in range(first_row, last_row + 1):
             path_columns[index] = core_columns[index]
-            path_entries[index] = core_entries[index]
+            path_layers[index] = core_layers[index]
 
     var expanded = expand_path(
-        left, right, path_columns, path_entries, alphabet, AlignmentMode.LOCAL, first_row, last_row
+        left, right, path_columns, path_layers, alphabet, AlignmentMode.LOCAL, first_row, last_row
     )
     var triple = alignment_triple(expanded[0], expanded[1], score)
     return triple
@@ -538,54 +523,20 @@ def smith_waterman_gotoh_alignment_linear_gpu(
     """Local alignment in linear space with every sweep running on the device."""
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var cells = DEFAULT_TILE_CELLS
     var left = translate(String(first), alphabet)
     var right = translate(String(second), alphabet)
-
-    var sequences = List[Scalar[SYMBOL_DTYPE]](capacity=len(left) + len(right))
-    sequences.extend(Span(left))
-    sequences.extend(Span(right))
-
-    var ctx = DeviceContext(device_id=placement.gpu_id)
-    var buffers = device_sweep_buffers(ctx, len(left), len(right), Span(sequences), substitutions)
-    var last_row, last_column, score = device_local_extremum[SweepHalf.FORWARD](
-        ctx, buffers, len(left), len(left), len(right), alphabet_size, scoring
+    var result = device_align[AlignmentMode.LOCAL](
+        DeviceContext(device_id=placement.gpu_id),
+        left,
+        right,
+        substitutions,
+        alphabet_size,
+        scoring,
+        alphabet,
+        DEFAULT_LEAF_CELLS,
+        placement,
     )
-
-    var path_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
-    var path_entries = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
-
-    var first_row = last_row
-    if score > 0:
-        var back_rows, back_columns, _ = device_local_extremum[SweepHalf.REVERSE](
-            ctx, buffers, len(left), last_row, last_column, alphabet_size, scoring
-        )
-        first_row = last_row - back_rows
-        var first_column = last_column - back_columns
-
-        path_columns[last_row] = Int32(last_column)
-        device_hirschberg(
-            ctx,
-            left,
-            right,
-            first_row,
-            last_row,
-            first_column,
-            last_column,
-            substitutions,
-            alphabet_size,
-            scoring,
-            cells,
-            placement,
-            path_columns,
-            path_entries,
-        )
-
-    var expanded = expand_path(
-        left, right, path_columns, path_entries, alphabet, AlignmentMode.LOCAL, first_row, last_row
-    )
-    var triple = alignment_triple(expanded[0], expanded[1], score)
-    return triple
+    return alignment_triple(result.first_gapped, result.second_gapped, result.score)
 
 
 def mode_from(value: PythonObject) raises -> AlignmentMode:

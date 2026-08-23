@@ -19,6 +19,8 @@ The third kind matters most: the first two would agree with each other while bot
 # pyright: reportArgumentType=false, reportAssignmentType=false, reportIndexIssue=false
 # pyright: reportReturnType=false
 
+import hashlib
+import math
 import json
 import os
 import pathlib
@@ -27,7 +29,7 @@ import subprocess
 import sys
 from itertools import combinations, product
 from random import choice, randint, seed as random_seed
-from typing import TypedDict
+from typing import NamedTuple, TypedDict
 
 import numpy as np
 import pytest
@@ -59,6 +61,14 @@ from affinegaps import (
 
 randomized_repetitions_count: int = int(os.environ.get("AFFINEGAPS_REPETITIONS", "10"))
 """How many times a randomised test runs. Override with `AFFINEGAPS_REPETITIONS`."""
+
+exhaustive_scale: int = max(1, int(os.environ.get("AFFINEGAPS_SCALE", "1")))
+"""Multiplier on every exhaustive oracle's budget, and the highest frozen tier re-derived.
+
+Breadth and depth are separate knobs on purpose: `AFFINEGAPS_REPETITIONS=100 AFFINEGAPS_SCALE=1`
+is a fuzzing run and `AFFINEGAPS_REPETITIONS=1 AFFINEGAPS_SCALE=4` is a release gate, and one
+number cannot express both.
+"""
 
 _seed_base: int | None = int(s) if (s := os.environ.get("AFFINEGAPS_SEED")) is not None else None
 """Base seed, if the caller wants a run reproduced. Unset means fresh data every run."""
@@ -188,14 +198,14 @@ def pytest_generate_tests(metafunc):
             metafunc.parametrize(argument, choices, indirect=True)
 
 
-class Placement(TypedDict):
+class BackendKeywords(TypedDict):
     """The two keywords that select where a call runs."""
 
     backend: Backend
     device: Device
 
 
-def _scoring_keywords(name: str) -> Placement:
+def _scoring_keywords(name: str) -> BackendKeywords:
     """The keywords selecting one backend, skipping when this machine cannot serve it."""
     backend, device = ALL_BACKENDS[name]
     if not available(backend, device):
@@ -530,6 +540,429 @@ def test_costs_cannot_express_a_contradiction():
 # endregion Compiled Backends
 
 
+# region Brute Force Oracles
+
+PAIRABLE = frozenset({("A", "U"), ("U", "A"), ("C", "G"), ("G", "C"), ("G", "U"), ("U", "G")})
+"""The six ordered letter pairs that can close, written out rather than read from `PAIR_INDEX`.
+
+Sharing the table with the implementation would let a corrupted row be agreed with instead of
+caught, which is the whole point of asking twice.
+"""
+
+
+def pair_slot(first: str, second: str) -> int:
+    """Which row of the Turner tables a letter pair occupies, or a negative for none."""
+    combined = first + second
+    return turner.PAIRS.index(combined) if combined in turner.PAIRS else -1
+
+
+def helix_end_penalty(slot: int) -> int:
+    """The helix-end charge, which every pair but Watson-Crick CG and GC pays."""
+    return 0 if turner.PAIRS[slot] in ("CG", "GC") else turner.TERMINAL_AU
+
+
+def tabulated_hairpin(sequence: str, opening: int, closing: int, size: int) -> int | None:
+    """A special-loop energy for this exact hairpin, which replaces initiation and mismatch."""
+    tables = {
+        3: (turner.TRILOOP_KEYS, turner.TRILOOP_ENERGIES),
+        4: (turner.TETRALOOP_KEYS, turner.TETRALOOP_ENERGIES),
+        6: (turner.HEXALOOP_KEYS, turner.HEXALOOP_ENERGIES),
+    }
+    if size not in tables:
+        return None
+    key = 0
+    for index in range(opening, closing + 1):
+        key = key * 4 + turner.BASES.index(sequence[index])
+    keys, energies = tables[size]
+    for index in range(len(keys)):
+        if int(keys[index]) == key:
+            return int(energies[index])
+    return None
+
+
+def hairpin_cost(sequence: str, opening: int, closing: int) -> int | None:
+    """A hairpin closed by these two positions, or nothing when the model forbids it."""
+    size = closing - opening - 1
+    slot = pair_slot(sequence[opening], sequence[closing])
+    if size < folding.MIN_HAIRPIN or slot < 0:
+        return None
+    tabulated = tabulated_hairpin(sequence, opening, closing, size)
+    if tabulated is not None:
+        return tabulated
+    if size <= turner.LOOP_LIMIT:
+        initiation = int(turner.HAIRPIN_INITIATION[size])
+    else:
+        initiation = int(turner.HAIRPIN_INITIATION[turner.LOOP_LIMIT]) + round(
+            10.79 * math.log(size / turner.LOOP_LIMIT)
+        )
+    if size == folding.MIN_HAIRPIN:
+        return initiation + helix_end_penalty(slot)
+    inner_left = turner.BASES.index(sequence[opening + 1])
+    inner_right = turner.BASES.index(sequence[closing - 1])
+    return initiation + int(turner.TERMINAL_MISMATCH_HAIRPIN[slot, inner_left, inner_right])
+
+
+def loop_cost(sequence: str, opening: int, closing: int, inner_open: int, inner_close: int) -> int | None:
+    """The loop between a pair and the pair directly inside it, or nothing when it is forbidden."""
+    outer = pair_slot(sequence[opening], sequence[closing])
+    inner = pair_slot(sequence[inner_open], sequence[inner_close])
+    if outer < 0 or inner < 0:
+        return None
+    before = inner_open - opening - 1
+    after = closing - inner_close - 1
+    if before + after > turner.LOOP_LIMIT:
+        return None
+    if before == 0 and after == 0:
+        return int(turner.STACK[outer, inner])
+    if before == 0 or after == 0:
+        size = before + after
+        if size == 1:
+            return int(turner.BULGE_INITIATION[size]) + int(turner.STACK[outer, inner])
+        return int(turner.BULGE_INITIATION[size]) + helix_end_penalty(outer) + helix_end_penalty(inner)
+    size = before + after
+    asymmetry = min(abs(before - after) * turner.NINIO_PER_ASYMMETRY, turner.NINIO_CAP)
+    reversed_inner = pair_slot(sequence[inner_close], sequence[inner_open])
+    outer_mismatch = int(
+        turner.TERMINAL_MISMATCH_INTERNAL[
+            outer, turner.BASES.index(sequence[opening + 1]), turner.BASES.index(sequence[closing - 1])
+        ]
+    )
+    inner_mismatch = int(
+        turner.TERMINAL_MISMATCH_INTERNAL[
+            reversed_inner,
+            turner.BASES.index(sequence[inner_close + 1]),
+            turner.BASES.index(sequence[inner_open - 1]),
+        ]
+    )
+    return int(turner.INTERNAL_INITIATION[size]) + asymmetry + outer_mismatch + inner_mismatch
+
+
+def dangle_cost(sequence: str, opening: int, closing: int) -> int:
+    """Both dangles on a helix sitting in an exterior loop or a multiloop."""
+    outward = pair_slot(sequence[closing], sequence[opening])
+    if outward < 0:
+        return 0
+    total = 0
+    if opening > 0:
+        total += int(turner.DANGLE_BEFORE[outward, turner.BASES.index(sequence[opening - 1])])
+    if closing < len(sequence) - 1:
+        total += int(turner.DANGLE_AFTER[outward, turner.BASES.index(sequence[closing + 1])])
+    return total
+
+
+def turner_energy_of(sequence: str, pairs) -> int | None:
+    """Decikilocalories for one structure, read straight off the Turner tables.
+
+    Shares no code with `folding.py`, so a table read at the wrong offset inside the recurrence's
+    own helpers is caught here instead of being agreed with. Returns nothing when the structure
+    contains a loop the model forbids, because a forbidden term must reject the whole structure
+    rather than be added as a large number that stacking could cancel.
+    """
+    partner = {opening: closing for opening, closing in pairs}
+    partner.update({closing: opening for opening, closing in pairs})
+
+    def children(low: int, high: int) -> list:
+        found, index = [], low
+        while index <= high:
+            if partner.get(index, -1) > index:
+                found.append((index, partner[index]))
+                index = partner[index] + 1
+            else:
+                index += 1
+        return found
+
+    def within(opening: int, closing: int) -> int | None:
+        nested = children(opening + 1, closing - 1)
+        if not nested:
+            return hairpin_cost(sequence, opening, closing)
+        if len(nested) == 1:
+            inner_open, inner_close = nested[0]
+            loop = loop_cost(sequence, opening, closing, inner_open, inner_close)
+            deeper = within(inner_open, inner_close)
+            return None if loop is None or deeper is None else loop + deeper
+        slot = pair_slot(sequence[opening], sequence[closing])
+        unpaired = (closing - opening - 1) - sum(high - low + 1 for low, high in nested)
+        total = (
+            turner.MULTILOOP_OFFSET
+            + turner.MULTILOOP_PER_HELIX * (len(nested) + 1)
+            + turner.MULTILOOP_PER_UNPAIRED * unpaired
+            + helix_end_penalty(slot)
+        )
+        for inner_open, inner_close in nested:
+            deeper = within(inner_open, inner_close)
+            if deeper is None:
+                return None
+            total += helix_end_penalty(pair_slot(sequence[inner_open], sequence[inner_close]))
+            total += dangle_cost(sequence, inner_open, inner_close)
+            total += deeper
+        return total
+
+    total = 0
+    for opening, closing in children(0, len(sequence) - 1):
+        deeper = within(opening, closing)
+        if deeper is None:
+            return None
+        total += helix_end_penalty(pair_slot(sequence[opening], sequence[closing]))
+        total += dangle_cost(sequence, opening, closing)
+        total += deeper
+    return total
+
+
+def enumerate_fold_structures(sequence: str):
+    """Every nested pair set the sequence admits, as tuples of (opening, closing).
+
+    A grammar over pair sets rather than a recurrence over energies: it never consults the tables
+    and never takes a minimum, so it cannot share a mistake with the thing it checks.
+    """
+
+    def below(start: int, stop: int):
+        if stop - start <= 0:
+            yield ()
+            return
+        yield from below(start + 1, stop)
+        for partner in range(start + folding.MIN_HAIRPIN + 1, stop):
+            if (sequence[start], sequence[partner]) in PAIRABLE:
+                for inside in below(start + 1, partner):
+                    for after in below(partner + 1, stop):
+                        yield ((start, partner), *inside, *after)
+
+    return below(0, len(sequence))
+
+
+def count_fold_structures(sequence: str) -> int:
+    """How many structures the enumeration would yield, memoized, so a budget can be checked first."""
+    seen: dict = {}
+
+    def below(start: int, stop: int) -> int:
+        if stop - start <= 0:
+            return 1
+        if (start, stop) not in seen:
+            found = below(start + 1, stop)
+            for partner in range(start + folding.MIN_HAIRPIN + 1, stop):
+                if (sequence[start], sequence[partner]) in PAIRABLE:
+                    found += below(start + 1, partner) * below(partner + 1, stop)
+            seen[(start, stop)] = found
+        return seen[(start, stop)]
+
+    return below(0, len(sequence))
+
+
+def brute_force_fold(sequence: str) -> int:
+    """The minimum free energy by enumeration, sharing no algorithm with the recurrence."""
+    best = 0
+    for pairs in enumerate_fold_structures(sequence):
+        energy = turner_energy_of(sequence, pairs)
+        if energy is not None and energy < best:
+            best = energy
+    return best
+
+
+# endregion Brute Force Oracles
+
+# region Frozen Expectations
+
+
+class FoldCase(NamedTuple):
+    """One folding expectation, frozen against the tables `TURNER_FINGERPRINT` names."""
+
+    tag: str
+    """Hyphenated, and the pytest identifier."""
+    sequence: str
+    """What is folded."""
+    structure: str
+    """Dot-bracket, written under the sequence so the pairing can be checked by eye."""
+    decikcal: int
+    """Integer decikilocalories, because the public entry point divides by ten on the way out."""
+    tier: int = 1
+    """Re-derived by enumeration only when `AFFINEGAPS_SCALE` reaches it."""
+
+
+class CofoldCase(NamedTuple):
+    """One cofolding expectation, frozen against the pair table and the covariance scoring."""
+
+    tag: str
+    """Hyphenated, and the pytest identifier."""
+    first: str
+    """The first input sequence."""
+    second: str
+    """The second input sequence."""
+    gapped_first: str
+    """The first row of the alignment, gaps written in."""
+    gapped_second: str
+    """The second row, gapped to the same columns."""
+    structure: str
+    """Dot-bracket over those columns."""
+    score: int
+    """The optimum of the recurrence, which is not a free energy."""
+    tier: int = 1
+    """Re-derived by enumeration only when `AFFINEGAPS_SCALE` reaches it."""
+
+
+def turner_fingerprint() -> str:
+    """A digest of every energy table and scalar the folding model reads, in a fixed order.
+
+    Names the model a frozen energy was derived against, so a table edit announces itself instead
+    of surfacing as a wall of unexplained mismatches.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    for name in (
+        "PAIR_INDEX",
+        "STACK",
+        "TERMINAL_MISMATCH_HAIRPIN",
+        "TERMINAL_MISMATCH_INTERNAL",
+        "DANGLE_AFTER",
+        "DANGLE_BEFORE",
+        "HAIRPIN_INITIATION",
+        "BULGE_INITIATION",
+        "INTERNAL_INITIATION",
+        "TRILOOP_KEYS",
+        "TRILOOP_ENERGIES",
+        "TETRALOOP_KEYS",
+        "TETRALOOP_ENERGIES",
+        "HEXALOOP_KEYS",
+        "HEXALOOP_ENERGIES",
+    ):
+        digest.update(name.encode())
+        digest.update(np.asarray(getattr(turner, name)).astype("<i4").tobytes())
+    for name in (
+        "LOOP_LIMIT",
+        "FORBIDDEN",
+        "MULTILOOP_OFFSET",
+        "MULTILOOP_PER_UNPAIRED",
+        "MULTILOOP_PER_HELIX",
+        "NINIO_PER_ASYMMETRY",
+        "NINIO_CAP",
+        "TERMINAL_AU",
+    ):
+        digest.update(f"{name}={getattr(turner, name)}".encode())
+    return digest.hexdigest()
+
+
+TURNER_FINGERPRINT = "56e7f9a51345536102ba7f870bc9bff1"
+"""The model every frozen folding energy below was derived against."""
+
+
+CORPUS_ORIGIN = """These are the answers this implementation gives today, checked case by case against a
+hand-derived expectation before being written down. They exist because every other folding and
+cofolding test is satisfied by a recurrence that returns a legal, self-consistent, cross-backend
+identical, suboptimal answer: a one-character slip in a scan bound leaves the whole suite green and
+changes what `("GC", "GC")` scores."""
+
+
+FOLD_CASES: tuple[FoldCase, ...] = (
+    FoldCase("empty", "", "", 0),
+    FoldCase("single-base", "A", ".", 0),
+    FoldCase("lone-pair-cannot-close", "GC", "..", 0),
+    FoldCase("unstacked-hairpin-refused", "GAAAC", ".....", 0),
+    FoldCase("homopolymer-adenine", "AAAAAAAAAAAA", "............", 0),
+    FoldCase("homopolymer-guanine", "GGGGGGGG", "........", 0),
+    FoldCase("homopolymer-cytosine", "CCCCCCCC", "........", 0),
+    FoldCase("homopolymer-uracil", "UUUUUUUU", "........", 0),
+    FoldCase("min-hairpin-exactly-three", "GGGAAACCC", "(((...)))", -12),
+    FoldCase("min-hairpin-two-refused", "GGGAACCC", "........", 0),
+    FoldCase("min-hairpin-one-refused", "GGGACCC", ".......", 0),
+    FoldCase("triloop-table", "GGGCAACGCCC", "((((...))))", -32),
+    FoldCase("tetraloop-uucg", "GGGCUUCGGCCC", "((((....))))", -63),
+    FoldCase("hexaloop-table", "GGACAGUACUCC", "(((......)))", -34),
+    FoldCase("bulge-one-five-prime", "GGCCAGCGCAAAAGCGCGGCC", "((((.((((....))))))))", -137),
+    FoldCase("bulge-one-three-prime", "GGCCGCGCAAAAGCGCAGGCC", "((((((((....)))).))))", -137),
+    FoldCase("bulge-two", "GGCCAAGCGCAAAAGCGCGGCC", "((((..((((....))))))))", -123),
+    FoldCase("bulge-three", "GGCCAAAGCGCAAAAGCGCGGCC", "((((...((((....))))))))", -119),
+    FoldCase("interior-two-by-two", "GGCCAAGCGCAAAAGCGCAAGGCC", "((((..((((....))))..))))", -140),
+    FoldCase("interior-one-by-three", "GGCCAGCGCAAAAGCGCAAAGGCC", "((((.((((....))))...))))", -128),
+    FoldCase("ninio-at-cap", "GGCCAGCGCAAAAGCGCAAAAAAGGCC", "((((.((((....))))......))))", -100),
+    FoldCase("ninio-clamped", "GGCCAGCGCAAAAGCGCAAAAAAAAGGCC", "((((.((((....))))........))))", -97),
+    FoldCase("single-wobble-stem", "GGGUAAAAUCCC", "(((......)))", -28),
+    FoldCase("wobble-inside-stem", "GGCGUAAAAUCGCC", "((((......))))", -53),
+    FoldCase("watson-crick-control", "GGCGCAAAAGCGCC", "(((((....)))))", -84),
+    FoldCase("guanine-cytosine-rich", "GGGCCAAAAGGCCC", "(((((....)))))", -92),
+    FoldCase("adenine-uracil-rich", "AAAUUAAAAUUUUU", "..............", 0),
+    FoldCase("tie-two-optima", "GCUCCUACGGACA", "..(((...)))..", -5),
+    FoldCase("tie-three-optima", "CUGGUAAACUGGCUCCA", "..((..........)).", -1),
+    FoldCase(
+        "hairpin-past-loop-limit",
+        "GGGGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACCCC",
+        "((((...................................))))",
+        -31,
+    ),
+    FoldCase("densest-affordable", "GGGGGGGGGGCCCCCCCCCC", "((((((((....))))))))", -190, tier=2),
+    FoldCase(
+        "interior-loop-at-max",
+        "GGGGAAAAAAAAAAAAAAAGGGGAAACCCCAAAAAAAAAAAAAAACCCC",
+        "((((...............((((...))))...............))))",
+        -107,
+        tier=2,
+    ),
+    FoldCase(
+        "interior-loop-past-max",
+        "GGGGAAAAAAAAAAAAAAAAGGGGAAACCCCAAAAAAAAAAAAAAACCCC",
+        "....................((((...))))...................",
+        -64,
+        tier=2,
+    ),
+    FoldCase("multiloop", "GCCCCGGGUCACCGGCAUUAAUGCGGGC", "(((((((....)))(((....)))))))", -89, tier=4),
+)
+
+COFOLD_CASES: tuple[CofoldCase, ...] = (
+    CofoldCase("both-empty", "", "", "", "", "", 0),
+    CofoldCase("first-empty", "", "A", "-", "A", ".", -2),
+    CofoldCase("second-empty", "A", "", "A", "-", ".", -2),
+    CofoldCase("first-empty-longer", "", "ACGU", "----", "ACGU", "....", -8),
+    CofoldCase("single-match", "A", "A", "A", "A", ".", 2),
+    CofoldCase("single-mismatch", "G", "C", "G", "C", ".", -1),
+    CofoldCase("no-minimum-hairpin", "GC", "GC", "GC", "GC", "()", 10),
+    CofoldCase("wobble-both-rows", "GU", "GU", "GU", "GU", "()", 6),
+    CofoldCase("covariation-across-wobble", "GC", "GU", "GC", "GU", "()", 5),
+    CofoldCase("homopolymer-match", "AAAA", "AAAA", "AAAA", "AAAA", "....", 8),
+    CofoldCase("homopolymer-unpairable", "GGGG", "GGGG", "GGGG", "GGGG", "....", 8),
+    CofoldCase("homopolymer-mismatch", "GGGG", "CCCC", "GGGG", "CCCC", "....", -4),
+    CofoldCase("sibling-helices", "CGAU", "CGAU", "CGAU", "CGAU", "()()", 18),
+    CofoldCase("sibling-then-nested", "CGAAUU", "CGAAUU", "CGAAUU", "CGAAUU", "()(())", 26),
+    CofoldCase("nested-depth-two", "GGCC", "GGCC", "GGCC", "GGCC", "(())", 20),
+    CofoldCase("nested-depth-three", "GGGCCC", "GGGCCC", "GGGCCC", "GGGCCC", "((()))", 30),
+    CofoldCase("alternating-pairs", "GCGCGC", "GCGCGC", "GCGCGC", "GCGCGC", "((()))", 30),
+    CofoldCase("helix-then-tail", "GGCCAA", "GGCCAA", "GGCCAA", "GGCCAA", "(())..", 24),
+    CofoldCase("head-then-helix", "AAGGCC", "AAGGCC", "AAGGCC", "AAGGCC", "..(())", 24),
+    CofoldCase("unequal-lengths", "AAAAA", "AAAA", "AAAAA", "AAAA-", ".....", 6),
+    CofoldCase("asymmetry-in-structure", "GGGGCCC", "GGGCCCC", "GGGGCCC", "GGGCCCC", "(((.)))", 29),
+    CofoldCase("nothing-pairs", "GAGAGA", "UCUCUC", "GAGAGA", "UCUCUC", "......", -6),
+    CofoldCase("planted-stem", "GGGGAAAACCCC", "CCCCAAAAGGGG", "GGGGAAAACCCC", "CCCCAAAAGGGG", "((((....))))", 24),
+    CofoldCase("tie-three-optima", "GC", "UAUCU", "-G--C", "UAUCU", ".(..)", -3),
+    CofoldCase("tie-two-optima", "GU", "CGUU", "-G-U", "CGUU", ".(.)", 2),
+    CofoldCase("tie-five-optima", "UUAA", "CGCCU", "UUAA-", "CGCCU", ".(.).", -1),
+    CofoldCase("tie-gapped-both", "GACG", "CUAG", "GAC--G", "--CUAG", "..(..)", 2),
+    CofoldCase("tie-leading-gaps", "UAG", "AGGAC", "--UAG", "AGGAC", "..(.)", 0),
+)
+
+
+@pytest.mark.parametrize("case", FOLD_CASES, ids=lambda case: case.tag)
+def test_fold_reproduces_the_frozen_corpus(backend, case: FoldCase):
+    """The frozen answer, on every backend, structure included."""
+    structure, energy = zuker_fold(case.sequence, **backend)
+    assert (structure, round(energy * 10)) == (case.structure, case.decikcal)
+
+
+@pytest.mark.parametrize("case", COFOLD_CASES, ids=lambda case: case.tag)
+def test_cofold_reproduces_the_frozen_corpus(backend, case: CofoldCase):
+    """The frozen answer, on every backend, both rows and the structure included."""
+    assert sankoff_cofold(case.first, case.second, **backend) == (
+        case.gapped_first,
+        case.gapped_second,
+        case.structure,
+        case.score,
+    )
+
+
+def test_the_frozen_corpus_matches_the_model_it_was_frozen_against():
+    """Edit the energy tables and this fails first, by name, rather than thirty energies at once."""
+    assert turner_fingerprint() == TURNER_FINGERPRINT, (
+        "turner.py changed, so every frozen folding energy is suspect. Re-derive them before"
+        " editing the corpus, and check whether the recurrence moved too."
+    )
+
+
+# endregion Frozen Expectations
+
 # region Cofolding
 
 COFOLD_ALPHABET = "ACGU"
@@ -569,7 +1002,7 @@ def structure_pairs(structure: str) -> list:
 
 def rescore_cofold(gapped_first: str, gapped_second: str, structure: str) -> int:
     """Scores an emitted alignment independently of the recurrence that produced it."""
-    pair_matrix = cofolding.default_rna_pair_matrix
+    pair_scores = cofolding.default_rna_pair_matrix
     total = 0
     for left, right in zip(gapped_first, gapped_second, strict=True):
         if left == "-" or right == "-":
@@ -580,7 +1013,7 @@ def rescore_cofold(gapped_first: str, gapped_second: str, structure: str) -> int
         for sequence in (gapped_first, gapped_second):
             left = COFOLD_ALPHABET.index(sequence[opening])
             right = COFOLD_ALPHABET.index(sequence[closing])
-            total += int(pair_matrix[left, right])
+            total += int(pair_scores[left, right])
     return total
 
 
@@ -597,7 +1030,7 @@ def test_cofold_recovers_both_sequences(backend):
 @pytest.mark.repeat(randomized_repetitions_count)
 def test_cofold_pairs_are_possible_in_both_sequences(backend):
     """A base pair is only credited where both sequences can actually form it."""
-    pair_matrix = cofolding.default_rna_pair_matrix
+    pair_scores = cofolding.default_rna_pair_matrix
     first, second = random_rna_pair()
     gapped_first, gapped_second, structure, _ = sankoff_cofold(first, second, **backend)
     for opening, closing in structure_pairs(structure):
@@ -605,7 +1038,7 @@ def test_cofold_pairs_are_possible_in_both_sequences(backend):
             assert sequence[opening] != "-" and sequence[closing] != "-", "a pair closed onto a gap"
             left = COFOLD_ALPHABET.index(sequence[opening])
             right = COFOLD_ALPHABET.index(sequence[closing])
-            assert pair_matrix[left, right] > 0, f"{sequence[opening]}-{sequence[closing]} cannot pair"
+            assert pair_scores[left, right] > 0, f"{sequence[opening]}-{sequence[closing]} cannot pair"
 
 
 @pytest.mark.repeat(randomized_repetitions_count)
@@ -655,6 +1088,108 @@ def test_cofold_credits_a_compensatory_mutation(backend):
     assert rescore_cofold(*paired_by_covariation[:3]) == paired_by_covariation[3]
 
 
+@pytest.mark.repeat(randomized_repetitions_count)
+def test_cofold_without_pairing_is_needleman_wunsch():
+    """With nothing able to pair, Sankoff degenerates to global alignment with linear gaps.
+
+    Binds the reference alone, because the dispatcher exposes no `pair_scores` keyword; the
+    compiled backends inherit it through `test_cofold_matches_the_reference`.
+    """
+    aligner = Align.PairwiseAligner(mode="global")
+    aligner.match_score, aligner.mismatch_score = COFOLD_MATCH, COFOLD_MISMATCH
+    aligner.open_gap_score = aligner.extend_gap_score = COFOLD_GAP
+    first, second = random_rna_pair()
+    unpairable = np.zeros((len(cofolding.default_rna_alphabet),) * 2, dtype=np.int32)
+    gapped_first, gapped_second, structure, score = cofolding.sankoff_cofold(first, second, pair_scores=unpairable)
+    assert score == aligner.score(first, second)
+    assert structure == "." * len(gapped_first)
+    optima = aligner.align(first, second)
+    if len(optima) <= 5000:
+        assert (gapped_first, gapped_second) in {(str(one[0]), str(one[1])) for one in optima}
+
+
+def weighted_nussinov(sequence: str) -> int:
+    """Maximum total pair weight of a nested structure, by the 1978 recurrence.
+
+    A different recurrence from Sankoff's, so agreeing with it is evidence rather than an echo.
+    """
+    codes = [cofolding.default_rna_alphabet.index(letter) for letter in sequence]
+    best: dict = {}
+
+    def within(low: int, high: int) -> int:
+        if high - low < 2:
+            return 0
+        if (low, high) not in best:
+            found = within(low + 1, high)
+            for partner in range(low + 1, high):
+                weight = int(cofolding.default_rna_pair_matrix[codes[low], codes[partner]])
+                if weight > 0:
+                    found = max(found, weight + within(low + 1, partner) + within(partner + 1, high))
+            best[(low, high)] = found
+        return best[(low, high)]
+
+    return within(0, len(sequence))
+
+
+@pytest.mark.repeat(randomized_repetitions_count)
+def test_cofold_with_a_prohibitive_gap_is_nussinov(backend):
+    """A gap nobody can afford forces the identity alignment, leaving one folding problem scored
+    twice, which an independently written Nussinov answers."""
+    sequence = random_rna(randint(1, 12))
+    gapped_first, gapped_second, _, score = sankoff_cofold(sequence, sequence, gap=-1000, **backend)
+    assert gapped_first == gapped_second == sequence
+    assert score == COFOLD_MATCH * len(sequence) + 2 * weighted_nussinov(sequence)
+
+
+def test_cofold_finds_a_planted_stem(backend):
+    """Each row holds exactly four G and four C, the loop is all A and no U exists anywhere, so
+    four pairs is the ceiling and the optimum is arithmetic rather than a stored answer."""
+    first, second = "GGGGAAAACCCC", "CCCCAAAAGGGG"
+    gapped_first, gapped_second, structure, score = sankoff_cofold(first, second, **backend)
+    assert (gapped_first, gapped_second, structure) == (first, second, "((((....))))")
+    assert score == 8 * COFOLD_MISMATCH + 4 * COFOLD_MATCH + 4 * (3 + 3)
+
+
+@pytest.mark.parametrize("width", (1, 2, 3, 4))
+def test_cofold_pays_exactly_for_a_forced_gap(backend, width: int):
+    """Padding inside an unpairable stretch improves no structure, so the optimum moves by the
+    gap price and nothing else. The gap is linear, so the width is a multiplier."""
+    first, second = "GGGGAAAACCCC", "CCCCAAAAGGGG"
+    optimum = sankoff_cofold(first, second, **backend)[3]
+    padded = first[:6] + "A" * width + first[6:]
+    assert sankoff_cofold(padded, second, **backend)[3] == optimum + width * COFOLD_GAP
+
+
+@pytest.mark.repeat(randomized_repetitions_count)
+def test_cofold_optimum_falls_as_gaps_get_harsher(backend):
+    """A harsher gap price lowers the value of every feasible solution, so the maximum over them
+    can never rise."""
+    first, second = random_rna_pair()
+    scores = [sankoff_cofold(first, second, gap=price, **backend)[3] for price in (-1, -2, -3, -5, -9)]
+    assert scores == sorted(scores, reverse=True), f"a harsher gap raised the optimum: {scores}"
+
+
+@pytest.mark.repeat(randomized_repetitions_count)
+def test_cofold_concatenation_never_loses(backend):
+    """Laying two independent solutions side by side is a legal solution of the joined problem,
+    so the joint optimum is at least their sum.
+
+    An inequality, not an equality: the optimum was observed pairing across the spacer, which is
+    a structure the side-by-side solution cannot express, so the joint answer is sometimes
+    strictly better.
+    """
+    left_first, left_second = random_rna(4), random_rna(4)
+    right_first, right_second = random_rna(4), random_rna(4)
+    spacer = "A" * 3
+    parts = (
+        sankoff_cofold(left_first, left_second, **backend)[3]
+        + sankoff_cofold(spacer, spacer, **backend)[3]
+        + sankoff_cofold(right_first, right_second, **backend)[3]
+    )
+    joint = sankoff_cofold(left_first + spacer + right_first, left_second + spacer + right_second, **backend)[3]
+    assert joint >= parts
+
+
 # endregion Cofolding
 
 
@@ -662,55 +1197,47 @@ def test_cofold_credits_a_compensatory_mutation(backend):
 
 
 def rescore_fold(sequence: str, structure: str) -> int:
-    """Sums the model's terms over a structure's loop decomposition, in decikilocalories.
+    """Decikilocalories for an emitted structure, over its loop decomposition.
 
-    Independent of the recurrence that produced the structure, so it catches a table read at the
-    wrong offset or a traceback that took a case the fill did not. Helices placed in the exterior
-    loop or a multiloop carry their dangles, as they do in the fill.
+    Shares no code with the recurrence, so it catches a table read at the wrong offset or a
+    traceback that took a case the fill did not.
     """
-    codes = np.array([folding.default_rna_alphabet.index(letter) for letter in sequence], dtype=np.int64)
-    partners = structure_partners(structure)
-    total = 0
+    pairs = [(opening, closing) for opening, closing in enumerate(structure_partners(structure)) if closing > opening]
+    energy = turner_energy_of(sequence, pairs)
+    assert energy is not None, f"the emitted structure holds a loop the model forbids: {structure}"
+    return energy
 
-    def children(low: int, high: int) -> list:
-        found, index = [], low
-        while index <= high:
-            if partners[index] > index:
-                found.append((index, partners[index]))
-                index = partners[index] + 1
-            else:
-                index += 1
-        return found
 
-    def walk(opening: int, closing: int) -> None:
-        nonlocal total
-        nested = children(opening + 1, closing - 1)
-        if not nested:
-            total += int(folding._hairpin_energy(codes, opening, closing))
-            return
-        if len(nested) == 1:
-            inner_open, inner_close = nested[0]
-            total += int(folding._interior_energy(codes, opening, closing, inner_open, inner_close))
-            walk(inner_open, inner_close)
-            return
-        pair = turner.PAIR_INDEX[codes[opening], codes[closing]]
-        unpaired = (closing - opening - 1) - sum(b - a + 1 for a, b in nested)
-        total += (
-            turner.MULTILOOP_OFFSET
-            + turner.MULTILOOP_PER_HELIX * (len(nested) + 1)
-            + turner.MULTILOOP_PER_UNPAIRED * unpaired
-            + int(folding._terminal_penalty(pair))
-        )
-        for inner_open, inner_close in nested:
-            total += int(folding._terminal_penalty(turner.PAIR_INDEX[codes[inner_open], codes[inner_close]]))
-            total += int(folding._dangle_energy(codes, inner_open, inner_close, len(sequence)))
-            walk(inner_open, inner_close)
+def random_brute_forceable_rna() -> str:
+    """A sequence whose whole structure space fits the budget, shortened until it does."""
+    sequence = random_rna(randint(8, 30))
+    while len(sequence) > 1 and count_fold_structures(sequence) > 8000 * exhaustive_scale:
+        sequence = sequence[:-1]
+    return sequence
 
-    for opening, closing in children(0, len(sequence) - 1):
-        total += int(folding._terminal_penalty(turner.PAIR_INDEX[codes[opening], codes[closing]]))
-        total += int(folding._dangle_energy(codes, opening, closing, len(sequence)))
-        walk(opening, closing)
-    return total
+
+@pytest.mark.repeat(randomized_repetitions_count)
+def test_fold_matches_brute_force_enumeration():
+    """The recurrence against enumerating every structure, using no dynamic programming.
+
+    The only oracle that can catch a recurrence which is self-consistently wrong on every backend
+    at once, which is exactly what a rewrite of the recurrence risks.
+    """
+    sequence = random_brute_forceable_rna()
+    _, energy = zuker_fold(sequence)
+    assert round(energy * 10) == brute_force_fold(sequence)
+
+
+@pytest.mark.parametrize("case", FOLD_CASES, ids=lambda case: case.tag)
+def test_frozen_folding_survives_enumeration(case: FoldCase):
+    """The frozen corpus re-derived by enumeration rather than trusted.
+
+    Tiered, because the multiloop case enumerates hundreds of thousands of structures; raise
+    `AFFINEGAPS_SCALE` to reach it.
+    """
+    if case.tier > exhaustive_scale:
+        pytest.skip(f"tier {case.tier} needs AFFINEGAPS_SCALE={case.tier}")
+    assert brute_force_fold(case.sequence) == case.decikcal
 
 
 def random_foldable_rna() -> str:
@@ -885,7 +1412,7 @@ def test_json_carries_the_placement(arguments: list):
 
 
 def test_verbose_leaves_stdout_parseable():
-    """Placement and throughput go to stderr, so a piped payload survives `2>/dev/null`."""
+    """BackendKeywords and throughput go to stderr, so a piped payload survives `2>/dev/null`."""
     outcome = run_python_cli(["fold", "GGGGCAAAAGCCCC", "--format", "json", "--verbose"])
     assert json.loads(outcome.stdout)["structure"] == "(((((....)))))"
     assert "throughput" in outcome.stderr

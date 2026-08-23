@@ -22,10 +22,13 @@ from max.gpu.host import DeviceContext
 from alignment import (
     AffineGapCosts,
     AlignmentMode,
+    AlignmentResult,
     DEFAULT_GAP_EXTENSION,
     DEFAULT_GAP_OPENING,
+    DEFAULT_LEAF_CELLS,
     colorize,
     default_proteins_matrix,
+    device_align,
     serial_align,
 )
 from cofolding import SankoffScoring, device_cofold, serial_cofold
@@ -34,6 +37,8 @@ from common import (
     DEFAULT_RNA_ALPHABET,
     Executor,
     Placement,
+    SubstitutionDType,
+    SymbolDType,
     hardware_threads,
     translate,
     uniform_matrix,
@@ -288,6 +293,33 @@ def report_placement(placement: Placement, options: Options, cells: Int, nanosec
 # region Verbs
 
 
+def aligned_pair[
+    mode: AlignmentMode
+](
+    first: ImmSpan[Scalar[SymbolDType], _],
+    second: ImmSpan[Scalar[SymbolDType], _],
+    substitutions: ImmSpan[Scalar[SubstitutionDType], _],
+    alphabet_size: Int,
+    scoring: AffineGapCosts,
+    alphabet: String,
+    placement: Placement,
+) raises -> AlignmentResult:
+    """Runs one pair where the caller asked, which is the only thing the verb decides."""
+    if placement.executor == Executor.DEVICE:
+        return device_align[mode](
+            DeviceContext(device_id=placement.gpu_id),
+            first,
+            second,
+            substitutions,
+            alphabet_size,
+            scoring,
+            alphabet,
+            DEFAULT_LEAF_CELLS,
+            placement,
+        )
+    return serial_align[mode](first, second, substitutions, alphabet_size, scoring, alphabet)
+
+
 def run_align(arguments: List[String], mut options: Options) raises -> Int:
     """Aligns two sequences and prints the report."""
     if len(arguments) < 2 or arguments[0] == "--help":
@@ -351,10 +383,10 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
     var right = translate(second_text, alphabet)
 
     var started = perf_counter_ns()
-    var result = serial_align[AlignmentMode.LOCAL](
-        left, right, substitutions, alphabet_size, scoring, alphabet
-    ) if mode_is_local else serial_align[AlignmentMode.GLOBAL](
-        left, right, substitutions, alphabet_size, scoring, alphabet
+    var result = aligned_pair[AlignmentMode.LOCAL](
+        left, right, substitutions, alphabet_size, scoring, alphabet, placement
+    ) if mode_is_local else aligned_pair[AlignmentMode.GLOBAL](
+        left, right, substitutions, alphabet_size, scoring, alphabet, placement
     )
     var elapsed = perf_counter_ns() - started
 
@@ -447,11 +479,11 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
 
     var placement = placement_of(options.request)
     var started = perf_counter_ns()
-    var outcome = device_fold(
+    var result = device_fold(
         DeviceContext(device_id=placement.gpu_id), sequence_text
     ) if placement.executor == Executor.DEVICE else serial_fold(sequence_text)
     var elapsed = perf_counter_ns() - started
-    var energy = Float64(Int(outcome.decikcal)) / 10.0
+    var energy = Float64(Int(result.decikcal)) / 10.0
 
     if options.format == Format.JSON:
         print(
@@ -466,7 +498,7 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
             ", ",
             quote("structure"),
             ": ",
-            quote(outcome.structure),
+            quote(result.structure),
             ", ",
             quote("energy_kcal_per_mol"),
             ": ",
@@ -488,7 +520,7 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
         )
     else:
         print("Sequence:  ", sequence_text, sep="")
-        print("Structure: ", outcome.structure, sep="")
+        print("Structure: ", result.structure, sep="")
         print("Energy:    ", energy, " kcal/mol", sep="")
 
     if options.verbose:
@@ -537,7 +569,7 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
     var alphabet = String(DEFAULT_RNA_ALPHABET)
     var scoring = SankoffScoring(Int32(gap))
     var started = perf_counter_ns()
-    var outcome = device_cofold(
+    var result = device_cofold(
         DeviceContext(device_id=placement.gpu_id),
         first_text,
         second_text,
@@ -567,19 +599,19 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
             ", ",
             quote("first_gapped"),
             ": ",
-            quote(outcome.gapped_first),
+            quote(result.gapped_first),
             ", ",
             quote("second_gapped"),
             ": ",
-            quote(outcome.gapped_second),
+            quote(result.gapped_second),
             ", ",
             quote("structure"),
             ": ",
-            quote(outcome.structure),
+            quote(result.structure),
             ", ",
             quote("score"),
             ": ",
-            Int(outcome.score),
+            Int(result.score),
             ", ",
             quote("backend"),
             ": ",
@@ -598,8 +630,8 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
     else:
         print("Sequence 1: ", first_text, sep="")
         print("Sequence 2: ", second_text, sep="")
-        print("Structure:  ", outcome.structure, sep="")
-        print("Score:      ", Int(outcome.score), sep="")
+        print("Structure:  ", result.structure, sep="")
+        print("Score:      ", Int(result.score), sep="")
 
     if options.verbose:
         var cells = first_text.byte_length() * second_text.byte_length()

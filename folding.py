@@ -4,10 +4,10 @@ Zuker minimum free energy folding, the parity oracle for `folding.mojo`.
 The recurrence is Zuker's, evaluated over the Turner nearest-neighbour model in `turner.py`. Three
 tables are filled in step: `paired` for a subsequence whose ends pair, `multiloop` for one that
 sits inside a multibranched loop, and `external` for one that does not. `multiloop` and `external`
-both read `paired` at the same span, so within one span the three are filled in that order.
+both read `paired` at the same window, so within one window the three are filled in that order.
 
 Everything is indexed by `(start, length)` rather than by two endpoints, so a bifurcation reads
-strictly smaller lengths and every cell of a span is independent, which is what the device sweep
+strictly smaller lengths and every cell of a window is independent, which is what the device sweep
 needs. Memory is $O(n^2)$ and time is $O(n^3)$, the interior-loop term being bounded by capping a
 loop at `MAX_LOOP` unpaired bases as every implementation of this recurrence does.
 
@@ -51,6 +51,11 @@ MAX_LOOP = LOOP_LIMIT
 
 # A hairpin needs at least three unpaired bases to close.
 MIN_HAIRPIN = 3
+# The shortest window `paired` can be finite on: a closing pair around a legal hairpin.
+MIN_HELIX_SPAN = MIN_HAIRPIN + 2
+
+# The shortest window `multiloop_closable` can be finite on: two branches side by side.
+MIN_MULTILOOP_SPAN = 2 * MIN_HELIX_SPAN
 
 # The two Watson-Crick pairs that are not charged a helix-end penalty.
 PAIR_CG, PAIR_GC = 1, 2
@@ -61,7 +66,7 @@ NO_PAIR = -1
 
 
 @jit_if_available(nopython=True)
-def _pairs(index: int) -> bool:
+def _is_pair(index: int) -> bool:
     """Whether a `PAIR_INDEX` answer names a real pair."""
     return index != NO_PAIR
 
@@ -113,7 +118,7 @@ def _dangle_energy(sequence: np.ndarray, start: int, end: int, length: int) -> i
     which is the simple treatment that needs no extra states in the recurrence.
     """
     outward = PAIR_INDEX[sequence[end], sequence[start]]
-    if not _pairs(outward):
+    if not _is_pair(outward):
         return 0
     total = 0
     if start > 0:
@@ -130,7 +135,7 @@ def _hairpin_energy(sequence: np.ndarray, start: int, end: int) -> int:
     if size < MIN_HAIRPIN:
         return FORBIDDEN
     pair = PAIR_INDEX[sequence[start], sequence[end]]
-    if not _pairs(pair):
+    if not _is_pair(pair):
         return FORBIDDEN
     tabulated = _special_hairpin(sequence, start, end, size)
     if tabulated < FORBIDDEN:
@@ -154,22 +159,22 @@ def _interior_energy(sequence: np.ndarray, start: int, end: int, inner_start: in
     """
     outer = PAIR_INDEX[sequence[start], sequence[end]]
     inner = PAIR_INDEX[sequence[inner_start], sequence[inner_end]]
-    if not _pairs(outer) or not _pairs(inner):
+    if not _is_pair(outer) or not _is_pair(inner):
         return FORBIDDEN
-    left = inner_start - start - 1
-    right = end - inner_end - 1
-    if left + right > MAX_LOOP:
+    unpaired_before = inner_start - start - 1
+    unpaired_after = end - inner_end - 1
+    if unpaired_before + unpaired_after > MAX_LOOP:
         return FORBIDDEN
-    if left == 0 and right == 0:
+    if unpaired_before == 0 and unpaired_after == 0:
         return STACK[outer, inner]
-    if left == 0 or right == 0:
-        size = left + right
+    if unpaired_before == 0 or unpaired_after == 0:
+        size = unpaired_before + unpaired_after
         if size == 1:
             # A single-base bulge keeps the helix stacked across it.
             return BULGE_INITIATION[size] + STACK[outer, inner]
         return BULGE_INITIATION[size] + _terminal_penalty(outer) + _terminal_penalty(inner)
-    size = left + right
-    correction = min(abs(left - right) * NINIO_PER_ASYMMETRY, NINIO_CAP)
+    size = unpaired_before + unpaired_after
+    correction = min(abs(unpaired_before - unpaired_after) * NINIO_PER_ASYMMETRY, NINIO_CAP)
     # The loop sees the inner helix from outside, so that pair is read reversed, the same way
     # the dangle tables are indexed.
     reversed_inner = PAIR_INDEX[sequence[inner_end], sequence[inner_start]]
@@ -181,36 +186,84 @@ def _interior_energy(sequence: np.ndarray, start: int, end: int, inner_start: in
 @jit_if_available(nopython=True)
 def _interior_end_floor(start: int, end: int, inner_start: int) -> int:
     """The earliest inner end that keeps the loop within `MAX_LOOP` unpaired bases."""
-    left = inner_start - start - 1
-    return max(end - 1 - (MAX_LOOP - left), inner_start + MIN_HAIRPIN + 1)
+    unpaired_before = inner_start - start - 1
+    return max(end - 1 - (MAX_LOOP - unpaired_before), inner_start + MIN_HAIRPIN + 1)
 
 
 @jit_if_available(nopython=True)
-def _winning_interior(sequence: np.ndarray, paired: np.ndarray, start: int, span: int) -> tuple:
-    """The nested pair whose interior loop reproduces a `paired` cell, or a negative span for none."""
-    end = start + span - 1
-    stored = paired[start, span]
+def _winning_interior(sequence: np.ndarray, paired: np.ndarray, start: int, window: int) -> tuple:
+    """The nested pair whose interior loop reproduces a `paired` cell, or a negative window for none."""
+    end = start + window - 1
+    stored = paired[start, window]
     for inner_start in range(start + 1, end):
         if inner_start - start - 1 > MAX_LOOP:
             break
         for inner_end in range(_interior_end_floor(start, end, inner_start), end):
-            inner_span = inner_end - inner_start + 1
-            if inner_span < MIN_HAIRPIN + 2:
+            inner_window = inner_end - inner_start + 1
+            if inner_window < MIN_HAIRPIN + 2:
                 continue
-            nested = paired[inner_start, inner_span]
+            nested = paired[inner_start, inner_window]
             if nested >= FORBIDDEN:
                 continue
             if _interior_energy(sequence, start, end, inner_start, inner_end) + nested == stored:
-                return inner_start, inner_span
+                return inner_start, inner_window
     return 0, -1
 
 
 @jit_if_available(nopython=True)
-def _paired_cell(sequence: np.ndarray, paired: np.ndarray, multiloop: np.ndarray, start: int, span: int) -> int:
+def _partner_index(sequence: np.ndarray) -> tuple:
+    """Where each letter's possible partners sit, as one ascending run per letter.
+
+    `bounds[letter, threshold]` indexes that letter's run at its first entry from `threshold`
+    onwards, so a window's candidates are a contiguous slice rather than a scan with a test in it.
+    """
+    length = sequence.shape[0]
+    alphabet_size = PAIR_INDEX.shape[0]
+    positions = np.zeros(alphabet_size * length, dtype=np.int64)
+    bounds = np.zeros((alphabet_size, length + 1), dtype=np.int64)
+    filled = 0
+    for letter in range(alphabet_size):
+        for position in range(length):
+            bounds[letter, position] = filled
+            if _is_pair(PAIR_INDEX[letter, sequence[position]]):
+                positions[filled] = position
+                filled += 1
+        bounds[letter, length] = filled
+    return positions, bounds
+
+
+@jit_if_available(nopython=True)
+def _branch_energy(sequence: np.ndarray, paired: np.ndarray, start: int, partner: int) -> int:
+    """One helix placed as a branch: what it encloses, its helix-end penalty and its dangles.
+
+    A pure function of where the helix starts and ends, never of what encloses it, which is why
+    the sweep stores it once per window instead of recomputing it once per candidate.
+    """
+    closed = paired[start, partner - start + 1]
+    if closed >= FORBIDDEN:
+        return FORBIDDEN
+    pair = PAIR_INDEX[sequence[start], sequence[partner]]
+    return closed + _terminal_penalty(pair) + _dangle_energy(sequence, start, partner, sequence.shape[0])
+
+
+@jit_if_available(nopython=True)
+def _reachable(bounds: np.ndarray, head: int, length: int, start: int, window: int) -> tuple:
+    """The slice of `head`'s partner run this window can close a helix with.
+
+    The `window < MIN_HELIX_SPAN` guard is load-bearing rather than an optimization: without it the
+    threshold can run past the end of `bounds`.
+    """
+    if window < MIN_HELIX_SPAN:
+        return 0, 0
+    return bounds[head, start + MIN_HELIX_SPAN - 1], bounds[head, start + window]
+
+
+@jit_if_available(nopython=True)
+def _paired_cell(sequence: np.ndarray, paired: np.ndarray, closable: np.ndarray, start: int, window: int) -> int:
     """Every case of one `paired` cell: the hairpin, the interior loops, and the multiloop closure."""
-    end = start + span - 1
+    end = start + window - 1
     pair = PAIR_INDEX[sequence[start], sequence[end]]
-    if not _pairs(pair) or span < MIN_HAIRPIN + 2:
+    if not _is_pair(pair) or window < MIN_HELIX_SPAN:
         return FORBIDDEN
 
     best = _hairpin_energy(sequence, start, end)
@@ -218,187 +271,231 @@ def _paired_cell(sequence: np.ndarray, paired: np.ndarray, multiloop: np.ndarray
         if inner_start - start - 1 > MAX_LOOP:
             break
         for inner_end in range(_interior_end_floor(start, end, inner_start), end):
-            inner_span = inner_end - inner_start + 1
-            if inner_span < MIN_HAIRPIN + 2:
+            inner_window = inner_end - inner_start + 1
+            if inner_window < MIN_HELIX_SPAN:
                 continue
-            nested = paired[inner_start, inner_span]
+            nested = paired[inner_start, inner_window]
             if nested >= FORBIDDEN:
                 continue
             loop = _interior_energy(sequence, start, end, inner_start, inner_end)
             if loop < FORBIDDEN and loop + nested < best:
                 best = loop + nested
 
-    # A multiloop closed by this pair: two or more helices inside it.
-    closure = MULTILOOP_OFFSET + MULTILOOP_PER_HELIX + _terminal_penalty(pair)
-    for split in range(start + 2, end - 1):
-        left = multiloop[start + 1, split - start - 1]
-        right = multiloop[split, end - split]
-        if left < FORBIDDEN and right < FORBIDDEN and left + right + closure < best:
-            best = left + right + closure
+    # A multiloop closed by this pair, whose interior must already hold two or more branches.
+    interior = closable[start + 1, window - 2]
+    if interior < FORBIDDEN:
+        closure = MULTILOOP_OFFSET + MULTILOOP_PER_HELIX + _terminal_penalty(pair)
+        if interior + closure < best:
+            best = interior + closure
     return best
 
 
 @jit_if_available(nopython=True)
-def _multiloop_seed(sequence: np.ndarray, paired: np.ndarray, multiloop: np.ndarray, start: int, span: int) -> int:
-    """A `multiloop` cell before its split scan: this span closing a helix, or trimmed by a base."""
-    end = start + span - 1
+def _multiloop_cell(
+    sequence: np.ndarray,
+    branch_placed: np.ndarray,
+    multiloop: np.ndarray,
+    positions: np.ndarray,
+    bounds: np.ndarray,
+    start: int,
+    window: int,
+) -> int:
+    """One `multiloop` cell, holding at least one branch: the head unpaired, or the head opening one."""
+    end = start + window - 1
     best = FORBIDDEN
-    closed = paired[start, span]
-    if closed < FORBIDDEN:
-        pair = PAIR_INDEX[sequence[start], sequence[end]]
-        best = closed + MULTILOOP_PER_HELIX + _terminal_penalty(pair)
-        best += _dangle_energy(sequence, start, end, sequence.shape[0])
-    if span > 1:
-        left_trimmed = multiloop[start + 1, span - 1]
-        if left_trimmed < FORBIDDEN and left_trimmed + MULTILOOP_PER_UNPAIRED < best:
-            best = left_trimmed + MULTILOOP_PER_UNPAIRED
-        right_trimmed = multiloop[start, span - 1]
-        if right_trimmed < FORBIDDEN and right_trimmed + MULTILOOP_PER_UNPAIRED < best:
-            best = right_trimmed + MULTILOOP_PER_UNPAIRED
+    if window > 1:
+        trimmed = multiloop[start + 1, window - 1]
+        if trimmed < FORBIDDEN and trimmed + MULTILOOP_PER_UNPAIRED < best:
+            best = trimmed + MULTILOOP_PER_UNPAIRED
+    low, high = _reachable(bounds, sequence[start], sequence.shape[0], start, window)
+    for index in range(high - 1, low - 1, -1):
+        partner = positions[index]
+        branch = branch_placed[start, partner - start + 1]
+        if branch >= FORBIDDEN:
+            continue
+        branch += MULTILOOP_PER_HELIX
+        tail = end - partner
+        # Nothing more pairs after this branch, which also covers a tail of no bases at all.
+        if branch + MULTILOOP_PER_UNPAIRED * tail < best:
+            best = branch + MULTILOOP_PER_UNPAIRED * tail
+        following = multiloop[partner + 1, tail]
+        if following < FORBIDDEN and branch + following < best:
+            best = branch + following
     return best
 
 
 @jit_if_available(nopython=True)
-def _external_seed(sequence: np.ndarray, paired: np.ndarray, external: np.ndarray, start: int, span: int) -> int:
-    """An `external` cell before its split scan, where unpaired bases are free."""
-    end = start + span - 1
-    best = min(external[start + 1, span - 1], external[start, span - 1]) if span > 1 else 0
-    closed = paired[start, span]
-    if closed < FORBIDDEN:
-        pair = PAIR_INDEX[sequence[start], sequence[end]]
-        candidate = closed + _terminal_penalty(pair) + _dangle_energy(sequence, start, end, sequence.shape[0])
+def _multiloop_closable_cell(
+    sequence: np.ndarray,
+    branch_placed: np.ndarray,
+    multiloop: np.ndarray,
+    closable: np.ndarray,
+    positions: np.ndarray,
+    bounds: np.ndarray,
+    start: int,
+    window: int,
+) -> int:
+    """One `multiloop_closable` cell: two or more branches, which is what a closing pair may enclose.
+
+    The only difference from `_multiloop_cell` is the absent all-unpaired tail, and that absence is
+    the entire mechanism by which Zuker's two-branch rule stays enforced.
+    """
+    end = start + window - 1
+    best = FORBIDDEN
+    if window > 1:
+        trimmed = closable[start + 1, window - 1]
+        if trimmed < FORBIDDEN and trimmed + MULTILOOP_PER_UNPAIRED < best:
+            best = trimmed + MULTILOOP_PER_UNPAIRED
+    low, high = _reachable(bounds, sequence[start], sequence.shape[0], start, window)
+    for index in range(high - 1, low - 1, -1):
+        partner = positions[index]
+        branch = branch_placed[start, partner - start + 1]
+        if branch >= FORBIDDEN:
+            continue
+        branch += MULTILOOP_PER_HELIX
+        following = multiloop[partner + 1, end - partner]
+        if following < FORBIDDEN and branch + following < best:
+            best = branch + following
+    return best
+
+
+@jit_if_available(nopython=True)
+def _external_cell(
+    sequence: np.ndarray,
+    branch_placed: np.ndarray,
+    external: np.ndarray,
+    positions: np.ndarray,
+    bounds: np.ndarray,
+    start: int,
+    window: int,
+) -> int:
+    """One `external` cell: the head unpaired and free, or the head opening the leftmost helix."""
+    end = start + window - 1
+    best = external[start + 1, window - 1]
+    low, high = _reachable(bounds, sequence[start], sequence.shape[0], start, window)
+    for index in range(high - 1, low - 1, -1):
+        partner = positions[index]
+        branch = branch_placed[start, partner - start + 1]
+        if branch >= FORBIDDEN:
+            continue
+        candidate = branch + external[partner + 1, end - partner]
         if candidate < best:
             best = candidate
     return best
 
 
 @jit_if_available(nopython=True)
-def _zuker_kernel(sequence: np.ndarray) -> tuple:
-    """Fills the three tables in increasing span, and within a span in dependency order."""
+def _zuker_tables_recurrence(sequence: np.ndarray) -> tuple:
+    """Fills the four tables in increasing window, and within a window in dependency order."""
     length = sequence.shape[0]
     paired = np.full((length + 1, length + 2), FORBIDDEN, dtype=np.int32)
     multiloop = np.full((length + 1, length + 2), FORBIDDEN, dtype=np.int32)
+    closable = np.full((length + 1, length + 2), FORBIDDEN, dtype=np.int32)
     external = np.zeros((length + 1, length + 2), dtype=np.int32)
+    branch_placed = np.full((length + 1, length + 2), FORBIDDEN, dtype=np.int32)
+    positions, bounds = _partner_index(sequence)
 
-    for span in range(1, length + 1):
-        for start in range(0, length - span + 1):
-            paired[start, span] = _paired_cell(sequence, paired, multiloop, start, span)
+    for window in range(1, length + 1):
+        for start in range(0, length - window + 1):
+            paired[start, window] = _paired_cell(sequence, paired, closable, start, window)
+            branch_placed[start, window] = _branch_energy(sequence, paired, start, start + window - 1)
+            multiloop[start, window] = _multiloop_cell(
+                sequence, branch_placed, multiloop, positions, bounds, start, window
+            )
+            closable[start, window] = _multiloop_closable_cell(
+                sequence, branch_placed, multiloop, closable, positions, bounds, start, window
+            )
+            external[start, window] = _external_cell(
+                sequence, branch_placed, external, positions, bounds, start, window
+            )
 
-            best = _multiloop_seed(sequence, paired, multiloop, start, span)
-            for split in range(1, span):
-                left = multiloop[start, split]
-                right = multiloop[start + split, span - split]
-                if left < FORBIDDEN and right < FORBIDDEN and left + right < best:
-                    best = left + right
-            multiloop[start, span] = best
-
-            best = _external_seed(sequence, paired, external, start, span)
-            for split in range(1, span):
-                candidate = external[start, split] + external[start + split, span - split]
-                if candidate < best:
-                    best = candidate
-            external[start, span] = best
-
-    return paired, multiloop, external
+    return paired, multiloop, closable, external
 
 
 def _traceback(sequence: np.ndarray, tables: tuple) -> list:
     """Re-derives the decomposition of each cell, collecting the pairs it commits to.
 
     Nothing is recorded during the fill: the tables are resident anyway, so testing the cases in
-    the same order the fill tried them costs less than a parallel array of decisions.
+    the same order the fill tried them costs less than a parallel array of decisions. Partners are
+    walked from the furthest back, so a tie resolves to the longest helix.
     """
-    paired, multiloop, external = tables
-    pairs: list = []
-    # Each item is a table name and the span it covers.
-    work = [("external", 0, sequence.shape[0])]
+    paired, multiloop, closable, external = tables
+    length = sequence.shape[0]
+    base_pairs: list = []
+    work = [("external", 0, length)]
     while work:
-        table, start, span = work.pop()
-        if span <= 0:
+        table, start, window = work.pop()
+        if window <= 0:
             continue
-        end = start + span - 1
-        pair = PAIR_INDEX[sequence[start], sequence[end]]
+        end = start + window - 1
 
         if table == "external":
-            stored = external[start, span]
-            if span > 1 and external[start + 1, span - 1] == stored:
-                work.append(("external", start + 1, span - 1))
+            stored = external[start, window]
+            if external[start + 1, window - 1] == stored:
+                work.append(("external", start + 1, window - 1))
                 continue
-            if span > 1 and external[start, span - 1] == stored:
-                work.append(("external", start, span - 1))
-                continue
-            placed = (
-                paired[start, span] + _terminal_penalty(pair) + _dangle_energy(sequence, start, end, sequence.shape[0])
-            )
-            if paired[start, span] < FORBIDDEN and placed == stored:
-                work.append(("paired", start, span))
-                continue
-            for split in range(1, span):
-                if external[start, split] + external[start + split, span - split] == stored:
-                    work.append(("external", start, split))
-                    work.append(("external", start + split, span - split))
+            for partner in range(end, start + MIN_HELIX_SPAN - 2, -1):
+                branch = _branch_energy(sequence, paired, start, partner)
+                if branch >= FORBIDDEN:
+                    continue
+                if branch + external[partner + 1, end - partner] == stored:
+                    work.append(("paired", start, partner - start + 1))
+                    work.append(("external", partner + 1, end - partner))
                     break
             continue
 
-        if table == "multiloop":
-            stored = multiloop[start, span]
-            placed = (
-                paired[start, span]
-                + MULTILOOP_PER_HELIX
-                + _terminal_penalty(pair)
-                + _dangle_energy(sequence, start, end, sequence.shape[0])
-            )
-            if paired[start, span] < FORBIDDEN and placed == stored:
-                work.append(("paired", start, span))
-                continue
-            if span > 1 and multiloop[start + 1, span - 1] + MULTILOOP_PER_UNPAIRED == stored:
-                work.append(("multiloop", start + 1, span - 1))
-                continue
-            if span > 1 and multiloop[start, span - 1] + MULTILOOP_PER_UNPAIRED == stored:
-                work.append(("multiloop", start, span - 1))
-                continue
-            for split in range(1, span):
-                if multiloop[start, split] + multiloop[start + split, span - split] == stored:
-                    work.append(("multiloop", start, split))
-                    work.append(("multiloop", start + split, span - split))
+        if table == "multiloop" or table == "multiloop_closable":
+            holding = multiloop if table == "multiloop" else closable
+            stored = holding[start, window]
+            if window > 1:
+                trimmed = holding[start + 1, window - 1]
+                if trimmed < FORBIDDEN and trimmed + MULTILOOP_PER_UNPAIRED == stored:
+                    work.append((table, start + 1, window - 1))
+                    continue
+            for partner in range(end, start + MIN_HELIX_SPAN - 2, -1):
+                branch = _branch_energy(sequence, paired, start, partner)
+                if branch >= FORBIDDEN:
+                    continue
+                branch += MULTILOOP_PER_HELIX
+                tail = end - partner
+                if table == "multiloop" and branch + MULTILOOP_PER_UNPAIRED * tail == stored:
+                    work.append(("paired", start, partner - start + 1))
+                    break
+                following = multiloop[partner + 1, tail]
+                if following < FORBIDDEN and branch + following == stored:
+                    work.append(("paired", start, partner - start + 1))
+                    work.append(("multiloop", partner + 1, tail))
                     break
             continue
 
-        stored = paired[start, span]
-        pairs.append((start, end))
+        stored = paired[start, window]
+        base_pairs.append((start, end))
         if _hairpin_energy(sequence, start, end) == stored:
             continue
-        inner_start, inner_span = _winning_interior(sequence, paired, start, span)
-        if inner_span > 0:
-            work.append(("paired", inner_start, inner_span))
+        inner_start, inner_window = _winning_interior(sequence, paired, start, window)
+        if inner_window > 0:
+            work.append(("paired", inner_start, inner_window))
             continue
+        pair = PAIR_INDEX[sequence[start], sequence[end]]
+        interior = closable[start + 1, window - 2]
         closure = MULTILOOP_OFFSET + MULTILOOP_PER_HELIX + _terminal_penalty(pair)
-        for split in range(start + 2, end - 1):
-            left = multiloop[start + 1, split - start - 1]
-            right = multiloop[split, end - split]
-            if left < FORBIDDEN and right < FORBIDDEN and left + right + closure == stored:
-                work.append(("multiloop", start + 1, split - start - 1))
-                work.append(("multiloop", split, end - split))
-                break
-    return pairs
+        if interior < FORBIDDEN and interior + closure == stored:
+            work.append(("multiloop_closable", start + 1, window - 2))
+    return base_pairs
 
 
 def zuker_fold(sequence: str, *, alphabet: str = default_rna_alphabet) -> tuple[str, float]:
-    """Folds one RNA sequence, returning its dot-bracket structure and free energy.
-
-    The energy is kilocalories per mole, converted from the integer decikilocalories the
-    recurrence works in.
-    """
+    """Folds one RNA sequence, returning its dot-bracket structure and free energy."""
     codes = {letter: index for index, letter in enumerate(alphabet)}
-    unknown = {letter for letter in sequence if letter not in codes}
+    unknown = {letter for letter in set(sequence) if letter not in codes}
     if unknown:
         raise ValueError(f"Found characters outside the alphabet {alphabet!r}: {''.join(sorted(unknown))}")
     if not sequence:
         return "", 0.0
 
     encoded = np.array([codes[letter] for letter in sequence], dtype=np.int64)
-    tables = _zuker_kernel(encoded)
-    energy = int(tables[2][0, len(sequence)])
+    tables = _zuker_tables_recurrence(encoded)
+    energy = int(tables[-1][0, len(sequence)])
     structure = ["."] * len(sequence)
     for opening, closing in _traceback(encoded, tables):
         structure[opening] = "("

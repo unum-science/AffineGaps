@@ -149,7 +149,7 @@ def _validate_gotoh_arguments(
 
 
 @jit_if_available(nopython=True)
-def _levenshtein_alignment_kernel(
+def _levenshtein_alignment_recurrence(
     encoded_first: np.ndarray, encoded_second: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -210,7 +210,7 @@ def levenshtein_alignment(first: str, second: str) -> tuple[str, str, int]:
     """
     encoded_first = np.array([ord(c) for c in first], dtype=np.uint32)
     encoded_second = np.array([ord(c) for c in second], dtype=np.uint32)
-    scores, changes = _levenshtein_alignment_kernel(encoded_first, encoded_second)
+    scores, changes = _levenshtein_alignment_recurrence(encoded_first, encoded_second)
     first_gapped, second_gapped = _reconstruct_alignment(
         changes, scores, scores, scores, encoded_first, encoded_second, 1, 1, chr, lambda i, j: i > 0 and j > 0
     )
@@ -218,7 +218,7 @@ def levenshtein_alignment(first: str, second: str) -> tuple[str, str, int]:
 
 
 @jit_if_available(nopython=True)
-def _needleman_wunsch_gotoh_kernel(
+def _needleman_wunsch_gotoh_recurrence(
     encoded_first: np.ndarray,
     encoded_second: np.ndarray,
     substitution_matrix: np.ndarray,
@@ -306,7 +306,7 @@ def _needleman_wunsch_gotoh_kernel(
 
 
 @jit_if_available(nopython=True)
-def _needleman_wunsch_gotoh_score_kernel(
+def _needleman_wunsch_gotoh_score_recurrence(
     encoded_first: np.ndarray,
     encoded_second: np.ndarray,
     substitution_matrix: np.ndarray,
@@ -366,7 +366,7 @@ def _needleman_wunsch_gotoh_score_kernel(
 
 
 @jit_if_available(nopython=True)
-def _smith_waterman_gotoh_kernel(
+def _smith_waterman_gotoh_recurrence(
     encoded_first: np.ndarray,
     encoded_second: np.ndarray,
     substitution_matrix: np.ndarray,
@@ -458,7 +458,7 @@ def _smith_waterman_gotoh_kernel(
 
 
 @jit_if_available(nopython=True)
-def _smith_waterman_gotoh_score_kernel(
+def _smith_waterman_gotoh_score_recurrence(
     encoded_first: np.ndarray,
     encoded_second: np.ndarray,
     substitution_matrix: np.ndarray,

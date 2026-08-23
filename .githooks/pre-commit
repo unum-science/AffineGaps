@@ -83,6 +83,24 @@ check_superscript_spacing() {
 
 # endregion Prose
 
+# region Code
+
+# A ceiling division written out is a shape the reader has to decode, and the spot an off-by-one
+# hides in. Mojo ships `ceildiv` in `std.math`; Python has `math.ceil` and the `-(-a // b)` idiom.
+check_raw_ceildiv() {
+    local paths=()
+    [ ${#mojo_staged[@]} -gt 0 ] && paths+=("${mojo_staged[@]}")
+    [ ${#python_staged[@]} -gt 0 ] && paths+=("${python_staged[@]}")
+    [ ${#paths[@]} -gt 0 ] || return 0
+    local hits
+    hits=$(git grep --cached -nE '\+ *[A-Za-z_0-9.]+ *- *1\) *//' -- "${paths[@]}" || true)
+    [ -z "$hits" ] || fail "$hits"$'\n' \
+        "a ceiling division is spelled out by hand." \
+        "            Write 'ceildiv(a, b)' rather than '(a + b - 1) // b'."
+}
+
+# endregion Code
+
 # region Toolchain Gates
 
 # `mojo format` is the law, but it has no --check mode, so format a copy and diff. It also resolves
@@ -133,6 +151,7 @@ check_python_format() {
 check_backticked_complexity
 check_rulers
 check_superscript_spacing
+check_raw_ceildiv
 check_mojo_format
 check_python_format
 

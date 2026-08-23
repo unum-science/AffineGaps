@@ -16,10 +16,10 @@ from max.gpu.host import DeviceBuffer, DeviceContext
 
 from errors import AffineGapsError, ErrorKind
 
-comptime SCORE_DTYPE = DType.int32
-comptime SYMBOL_DTYPE = DType.uint8
-comptime SUBSTITUTION_DTYPE = DType.int8
-comptime OFFSET_DTYPE = DType.uint64
+comptime ScoreDType = DType.int32
+comptime SymbolDType = DType.uint8
+comptime SubstitutionDType = DType.int8
+comptime OffsetDType = DType.uint64
 """
 Indexes the concatenated batch tape rather than one sequence, so it is bounded by the sum of every length in the batch
 and not by the longest of them.
@@ -145,34 +145,22 @@ def target_shared_per_multiprocessor[blocks_per_multiprocessor: Int]() -> Int:
     return blocks_per_multiprocessor * STATIC_SHARED_LIMIT
 
 
-def shared_per_block[blocks_per_multiprocessor: Int]() -> Int:
-    """Static shared memory one block may hold with that many resident per multiprocessor.
-
-    The occupancy target is a parameter because the two recurrence families want opposite
-    answers: a banded sweep carries its live diagonals in shared memory and wants a large
-    carve-out, while a bifurcating sweep carries only a reduction array and would rather have
-    more blocks resident.
-    """
-    var available = target_shared_per_multiprocessor[blocks_per_multiprocessor]()
-    return min(available // blocks_per_multiprocessor, STATIC_SHARED_LIMIT)
-
-
 def max_dynamic_shared[blocks_per_multiprocessor: Int]() -> Int:
     """Dynamic shared memory one block may opt into, which is all of it but the driver's reserve."""
     return target_shared_per_multiprocessor[blocks_per_multiprocessor]() - SHARED_RESERVED
 
 
-def uniform_matrix(alphabet_size: Int, match_score: Int, mismatch_score: Int) -> List[Scalar[SUBSTITUTION_DTYPE]]:
+def uniform_matrix(alphabet_size: Int, match_score: Int, mismatch_score: Int) -> List[Scalar[SubstitutionDType]]:
     """Diagonal substitution matrix, the `match`/`mismatch` path of `_validate_gotoh_arguments`."""
-    var matrix = List[Scalar[SUBSTITUTION_DTYPE]](
-        length=alphabet_size * alphabet_size, fill=Scalar[SUBSTITUTION_DTYPE](mismatch_score)
+    var matrix = List[Scalar[SubstitutionDType]](
+        length=alphabet_size * alphabet_size, fill=Scalar[SubstitutionDType](mismatch_score)
     )
     for index in range(alphabet_size):
-        matrix[index * alphabet_size + index] = Scalar[SUBSTITUTION_DTYPE](match_score)
+        matrix[index * alphabet_size + index] = Scalar[SubstitutionDType](match_score)
     return matrix^
 
 
-def translate(text: String, alphabet: String) raises AffineGapsError -> List[Scalar[SYMBOL_DTYPE]]:
+def translate(text: String, alphabet: String) raises AffineGapsError -> List[Scalar[SymbolDType]]:
     """Maps characters to alphabet indices, raising on anything outside the alphabet."""
     var alphabet_bytes = alphabet.as_bytes()
     var text_bytes = text.as_bytes()
@@ -180,12 +168,12 @@ def translate(text: String, alphabet: String) raises AffineGapsError -> List[Sca
     for index in range(len(alphabet_bytes)):
         codes_by_byte[Int(alphabet_bytes[index])] = UInt8(index)
 
-    var codes = List[Scalar[SYMBOL_DTYPE]](capacity=len(text_bytes))
+    var codes = List[Scalar[SymbolDType]](capacity=len(text_bytes))
     for position in range(len(text_bytes)):
         var code = codes_by_byte[Int(text_bytes[position])]
         if code == UNKNOWN_SYMBOL:
             raise AffineGapsError(ErrorKind.UNKNOWN_SYMBOL, text)
-        codes.append(Scalar[SYMBOL_DTYPE](code))
+        codes.append(Scalar[SymbolDType](code))
     return codes^
 
 

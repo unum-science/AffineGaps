@@ -1,13 +1,13 @@
 """
 Zuker minimum free energy folding for CPU and GPU, exact and with traceback.
 
-Three tables are filled in step: `paired` for a subsequence whose ends pair, `multiloop` for one
+Three energy_model are filled in step: `paired` for a subsequence whose ends pair, `multiloop` for one
 inside a multibranched loop, and `external` for one that is not enclosed. Both `multiloop` and
-`external` read `paired` at the same span, so a span is swept in that order and the device runs
-three launches per span rather than one.
+`external` read `paired` at the same window, so a window is swept in that order and the device runs
+three launches per window rather than one.
 
-Everything is indexed by `(start, length)`, so a bifurcation reads strictly smaller lengths and
-every cell of a span is independent. Memory is $O(n^2)$ and time is $O(n^3)$, the interior-loop
+Everything is indexed by `(start, sequence_length)`, so a bifurcation reads strictly smaller lengths and
+every cell of a window is independent. Memory is $O(n^2)$ and time is $O(n^3)$, the interior-loop
 term bounded by capping a loop at `MAX_LOOP` unpaired bases as this recurrence always is.
 
 Energies are integer decikilocalories per mole, so a fold is reproducible bit for bit rather than
@@ -15,24 +15,27 @@ depending on floating-point association order.
 
 The energy model is the subset described in `turner.mojo`. It reproduces RNAstructure's `efn2`
 exactly for structures built from stacks and hairpins, and differs where dangling ends, coaxial
-stacking, tetraloop bonuses or the special small-internal-loop tables would apply.
+stacking, tetraloop bonuses or the special small-internal-loop energy_model would apply.
 
 The recurrence, the tie-breaking and the traceback are transcribed from `folding.py`, the oracle.
 """
 
 from std.gpu import block_idx, thread_idx
-from std.math import log
+from std.gpu.primitives.warp import WARP_SIZE, min as warp_min
 from std.memory import stack_allocation
 from std.memory.pointer import AddressSpace
 
 from max.gpu import barrier
+from std.math import log
+
 from max.gpu.host import DeviceContext
 
+from errors import AffineGapsError, ErrorKind
 from common import (
     CLOSE_BYTE,
     DEFAULT_RNA_ALPHABET,
     OPEN_BYTE,
-    SYMBOL_DTYPE,
+    SymbolDType,
     THREADS_PER_BLOCK,
     UNPAIRED_BYTE,
     translate,
@@ -43,7 +46,7 @@ from turner import (
     BULGE_INITIATION,
     DANGLE_AFTER,
     DANGLE_BEFORE,
-    ENERGY_DTYPE,
+    EnergyDType,
     FORBIDDEN,
     HAIRPIN_INITIATION,
     HEXALOOP_ENERGIES,
@@ -71,9 +74,17 @@ from turner import (
 
 comptime MAX_LOOP = LOOP_LIMIT
 comptime MIN_HAIRPIN = 3
+comptime MIN_HELIX_SPAN = MIN_HAIRPIN + 2
+"""The shortest window `paired` can be finite on, a closing pair around a legal hairpin."""
+comptime MIN_MULTILOOP_SPAN = 2 * MIN_HELIX_SPAN
+"""The shortest window `closable` can be finite on, two branches side by side."""
+comptime PositionDType = DType.int32
+comptime RNA_ALPHABET_SIZE = 4
+"""Letters the folding model knows, which is what sizes the per-letter partner runs."""
+comptime WARPS_PER_BLOCK = THREADS_PER_BLOCK // WARP_SIZE
 
 comptime PAIR_CG = 1
-"""The two Watson-Crick pairs that are not charged a helix-end penalty."""
+"""The two Watson-Crick is_pair that are not charged a helix-end penalty."""
 comptime PAIR_GC = 2
 
 comptime TRILOOP_COUNT = len(TRILOOP_KEYS)
@@ -96,10 +107,10 @@ comptime TETRALOOP_KEY_OFFSET = TRILOOP_ENERGY_OFFSET + TRILOOP_COUNT
 comptime TETRALOOP_ENERGY_OFFSET = TETRALOOP_KEY_OFFSET + TETRALOOP_COUNT
 comptime HEXALOOP_KEY_OFFSET = TETRALOOP_ENERGY_OFFSET + TETRALOOP_COUNT
 comptime HEXALOOP_ENERGY_OFFSET = HEXALOOP_KEY_OFFSET + HEXALOOP_COUNT
-comptime TABLE_CELLS = HEXALOOP_ENERGY_OFFSET + HEXALOOP_COUNT
+comptime ENERGY_MODEL_LENGTH = HEXALOOP_ENERGY_OFFSET + HEXALOOP_COUNT
 
 
-def packed_turner_tables() -> List[Scalar[ENERGY_DTYPE]]:
+def packed_energy_model() -> List[Scalar[EnergyDType]]:
     """Every table this recurrence reads, concatenated at the offsets above."""
     var stack = materialize[STACK]()
     var hairpin_mismatch = materialize[TERMINAL_MISMATCH_HAIRPIN]()
@@ -109,7 +120,7 @@ def packed_turner_tables() -> List[Scalar[ENERGY_DTYPE]]:
     var hairpin = materialize[HAIRPIN_INITIATION]()
     var bulge = materialize[BULGE_INITIATION]()
     var internal = materialize[INTERNAL_INITIATION]()
-    var pairs = materialize[PAIR_INDEX]()
+    var is_pair = materialize[PAIR_INDEX]()
     var triloop_keys = materialize[TRILOOP_KEYS]()
     var triloop_energies = materialize[TRILOOP_ENERGIES]()
     var tetraloop_keys = materialize[TETRALOOP_KEYS]()
@@ -117,7 +128,7 @@ def packed_turner_tables() -> List[Scalar[ENERGY_DTYPE]]:
     var hexaloop_keys = materialize[HEXALOOP_KEYS]()
     var hexaloop_energies = materialize[HEXALOOP_ENERGIES]()
 
-    var packed = List[Scalar[ENERGY_DTYPE]](length=TABLE_CELLS, fill=Scalar[ENERGY_DTYPE](0))
+    var packed = List[Scalar[EnergyDType]](length=ENERGY_MODEL_LENGTH, fill=Scalar[EnergyDType](0))
     for index in range(PAIR_TYPES * PAIR_TYPES):
         packed[STACK_OFFSET + index] = stack[index]
     for index in range(PAIR_TYPES * 16):
@@ -131,7 +142,7 @@ def packed_turner_tables() -> List[Scalar[ENERGY_DTYPE]]:
         packed[BULGE_OFFSET + index] = bulge[index]
         packed[INTERNAL_OFFSET + index] = internal[index]
     for index in range(16):
-        packed[PAIR_INDEX_OFFSET + index] = pairs[index]
+        packed[PAIR_INDEX_OFFSET + index] = is_pair[index]
     for index in range(TRILOOP_COUNT):
         packed[TRILOOP_KEY_OFFSET + index] = triloop_keys[index]
         packed[TRILOOP_ENERGY_OFFSET + index] = triloop_energies[index]
@@ -145,19 +156,19 @@ def packed_turner_tables() -> List[Scalar[ENERGY_DTYPE]]:
 
 
 comptime NO_PAIR = -1
-"""What `pair_of` answers when two bases form none of the six pairs."""
+"""What `pair_of` answers when two bases form none of the six is_pair."""
 
 
 @always_inline
-def pairs(index: Int) -> Bool:
+def is_pair(index: Int) -> Bool:
     """Whether a `pair_of` answer names a real pair."""
     return index != NO_PAIR
 
 
 @always_inline
-def pair_of(tables: Pointer[Scalar[ENERGY_DTYPE], _], left: Int, right: Int) -> Int:
+def pair_of(energy_model: Pointer[Scalar[EnergyDType], _], unpaired_before: Int, unpaired_after: Int) -> Int:
     """Which of the six pair types two bases form, or a negative value for none."""
-    return Int(tables[unsafe_offset=PAIR_INDEX_OFFSET + left * 4 + right])
+    return Int(energy_model[unsafe_offset=PAIR_INDEX_OFFSET + unpaired_before * 4 + unpaired_after])
 
 
 @always_inline
@@ -169,7 +180,7 @@ def terminal_penalty(pair: Int) -> Int32:
 
 
 @always_inline
-def packed_key(sequence: Pointer[Scalar[SYMBOL_DTYPE], _], start: Int, end: Int) -> Int32:
+def packed_key(sequence: Pointer[Scalar[SymbolDType], _], start: Int, end: Int) -> Int32:
     """The closing pair and loop bases packed base-four, most significant first."""
     var key = Int32(0)
     for index in range(start, end + 1):
@@ -179,8 +190,8 @@ def packed_key(sequence: Pointer[Scalar[SYMBOL_DTYPE], _], start: Int, end: Int)
 
 @always_inline
 def special_hairpin(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], _],
-    tables: Pointer[Scalar[ENERGY_DTYPE], _],
+    sequence: Pointer[Scalar[SymbolDType], _],
+    energy_model: Pointer[Scalar[EnergyDType], _],
     start: Int,
     end: Int,
     size: Int,
@@ -188,7 +199,7 @@ def special_hairpin(
     """A tabulated hairpin energy for this exact loop, or `FORBIDDEN` when there is none.
 
     These replace initiation and terminal mismatch rather than adding to them, which is how the
-    tables are defined and how `efn2` applies them.
+    energy_model are defined and how `efn2` applies them.
     """
     var keys: Int
     var energies: Int
@@ -203,39 +214,39 @@ def special_hairpin(
         return FORBIDDEN
     var key = packed_key(sequence, start, end)
     for index in range(count):
-        if tables[unsafe_offset=keys + index] == key:
-            return tables[unsafe_offset=energies + index]
+        if energy_model[unsafe_offset=keys + index] == key:
+            return energy_model[unsafe_offset=energies + index]
     return FORBIDDEN
 
 
 @always_inline
 def dangle_energy(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], _],
-    tables: Pointer[Scalar[ENERGY_DTYPE], _],
+    sequence: Pointer[Scalar[SymbolDType], _],
+    energy_model: Pointer[Scalar[EnergyDType], _],
     start: Int,
     end: Int,
-    length: Int,
+    sequence_length: Int,
 ) -> Int32:
     """Both dangles on a helix placed in an exterior loop or a multiloop.
 
     The pair is read from outside the helix, and both neighbours are charged whenever they exist,
     which is the simple treatment that needs no extra states in the recurrence.
     """
-    var outward = pair_of(tables, Int(sequence[unsafe_offset=end]), Int(sequence[unsafe_offset=start]))
-    if not pairs(outward):
+    var outward = pair_of(energy_model, Int(sequence[unsafe_offset=end]), Int(sequence[unsafe_offset=start]))
+    if not is_pair(outward):
         return Int32(0)
     var total = Int32(0)
     if start > 0:
-        total += tables[unsafe_offset=DANGLE_BEFORE_OFFSET + outward * 4 + Int(sequence[unsafe_offset=start - 1])]
-    if end < length - 1:
-        total += tables[unsafe_offset=DANGLE_AFTER_OFFSET + outward * 4 + Int(sequence[unsafe_offset=end + 1])]
+        total += energy_model[unsafe_offset=DANGLE_BEFORE_OFFSET + outward * 4 + Int(sequence[unsafe_offset=start - 1])]
+    if end < sequence_length - 1:
+        total += energy_model[unsafe_offset=DANGLE_AFTER_OFFSET + outward * 4 + Int(sequence[unsafe_offset=end + 1])]
     return total
 
 
 @always_inline
 def hairpin_energy(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], _],
-    tables: Pointer[Scalar[ENERGY_DTYPE], _],
+    sequence: Pointer[Scalar[SymbolDType], _],
+    energy_model: Pointer[Scalar[EnergyDType], _],
     start: Int,
     end: Int,
 ) -> Int32:
@@ -243,32 +254,31 @@ def hairpin_energy(
     var size = end - start - 1
     if size < MIN_HAIRPIN:
         return FORBIDDEN
-    var pair = pair_of(tables, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
-    if not pairs(pair):
+    var pair = pair_of(energy_model, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
+    if not is_pair(pair):
         return FORBIDDEN
-    var tabulated = special_hairpin(sequence, tables, start, end, size)
+    var tabulated = special_hairpin(sequence, energy_model, start, end, size)
     if tabulated < FORBIDDEN:
         return tabulated
+    var initiation = energy_model[unsafe_offset=HAIRPIN_OFFSET + min(size, LOOP_LIMIT)]
     if size > LOOP_LIMIT:
         var ratio = Float64(size) / Float64(LOOP_LIMIT)
         """
         Beyond the tabulated sizes the model extrapolates by polymer theory, which needs a logarithm; capping instead
         would make long loops artificially cheap.
         """
-        var extrapolated = Int32(round(10.79 * log(ratio)))
-        return tables[unsafe_offset=HAIRPIN_OFFSET + LOOP_LIMIT] + extrapolated
-    var initiation = tables[unsafe_offset=HAIRPIN_OFFSET + size]
+        initiation += Int32(round(10.79 * log(ratio)))
     if size == MIN_HAIRPIN:
         return initiation + terminal_penalty(pair)
     var first_unpaired = Int(sequence[unsafe_offset=start + 1])
     var last_unpaired = Int(sequence[unsafe_offset=end - 1])
-    return initiation + tables[unsafe_offset=MISMATCH_OFFSET + pair * 16 + first_unpaired * 4 + last_unpaired]
+    return initiation + energy_model[unsafe_offset=MISMATCH_OFFSET + pair * 16 + first_unpaired * 4 + last_unpaired]
 
 
 @always_inline
 def interior_energy(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], _],
-    tables: Pointer[Scalar[ENERGY_DTYPE], _],
+    sequence: Pointer[Scalar[SymbolDType], _],
+    energy_model: Pointer[Scalar[EnergyDType], _],
     start: Int,
     end: Int,
     inner_start: Int,
@@ -279,60 +289,62 @@ def interior_energy(
     Nothing unpaired on either side is a stack, nothing on one side is a bulge, and anything else
     is an internal loop carrying Ninio's asymmetry correction.
     """
-    var outer = pair_of(tables, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
-    var inner = pair_of(tables, Int(sequence[unsafe_offset=inner_start]), Int(sequence[unsafe_offset=inner_end]))
-    if not pairs(outer) or not pairs(inner):
+    var outer = pair_of(energy_model, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
+    var inner = pair_of(energy_model, Int(sequence[unsafe_offset=inner_start]), Int(sequence[unsafe_offset=inner_end]))
+    if not is_pair(outer) or not is_pair(inner):
         return FORBIDDEN
-    var left = inner_start - start - 1
-    var right = end - inner_end - 1
-    if left + right > MAX_LOOP:
+    var unpaired_before = inner_start - start - 1
+    var unpaired_after = end - inner_end - 1
+    if unpaired_before + unpaired_after > MAX_LOOP:
         return FORBIDDEN
-    if left == 0 and right == 0:
-        return tables[unsafe_offset=STACK_OFFSET + outer * PAIR_TYPES + inner]
-    var size = left + right
-    if left == 0 or right == 0:
+    if unpaired_before == 0 and unpaired_after == 0:
+        return energy_model[unsafe_offset=STACK_OFFSET + outer * PAIR_TYPES + inner]
+    var size = unpaired_before + unpaired_after
+    if unpaired_before == 0 or unpaired_after == 0:
         if size == 1:
             # A single-base bulge keeps the helix stacked across it.
             return (
-                tables[unsafe_offset=BULGE_OFFSET + size]
-                + tables[unsafe_offset=STACK_OFFSET + outer * PAIR_TYPES + inner]
+                energy_model[unsafe_offset=BULGE_OFFSET + size]
+                + energy_model[unsafe_offset=STACK_OFFSET + outer * PAIR_TYPES + inner]
             )
-        return tables[unsafe_offset=BULGE_OFFSET + size] + terminal_penalty(outer) + terminal_penalty(inner)
-    var asymmetry = left - right if left > right else right - left
+        return energy_model[unsafe_offset=BULGE_OFFSET + size] + terminal_penalty(outer) + terminal_penalty(inner)
+    var asymmetry = (
+        unpaired_before - unpaired_after if unpaired_before > unpaired_after else unpaired_after - unpaired_before
+    )
     var correction = min(Int32(asymmetry) * NINIO_PER_ASYMMETRY, NINIO_CAP)
     var reversed_inner = pair_of(
-        tables, Int(sequence[unsafe_offset=inner_end]), Int(sequence[unsafe_offset=inner_start])
+        energy_model, Int(sequence[unsafe_offset=inner_end]), Int(sequence[unsafe_offset=inner_start])
     )
     """
-    The loop sees the inner helix from outside, so that pair is read reversed, the same way the dangle tables are
+    The loop sees the inner helix from outside, so that pair is read reversed, the same way the dangle energy_model are
     indexed.
     """
-    var outer_mismatch = tables[
+    var outer_mismatch = energy_model[
         unsafe_offset=MISMATCH_INTERNAL_OFFSET
         + outer * 16
         + Int(sequence[unsafe_offset=start + 1]) * 4
         + Int(sequence[unsafe_offset=end - 1])
     ]
-    var inner_mismatch = tables[
+    var inner_mismatch = energy_model[
         unsafe_offset=MISMATCH_INTERNAL_OFFSET
         + reversed_inner * 16
         + Int(sequence[unsafe_offset=inner_end + 1]) * 4
         + Int(sequence[unsafe_offset=inner_start - 1])
     ]
-    return tables[unsafe_offset=INTERNAL_OFFSET + size] + correction + outer_mismatch + inner_mismatch
+    return energy_model[unsafe_offset=INTERNAL_OFFSET + size] + correction + outer_mismatch + inner_mismatch
 
 
 @always_inline
-def cell_index(start: Int, span: Int, length: Int) -> Int:
-    """Row-major over `(start, span)`, with one column of slack so `span = length` fits."""
-    return start * (length + 2) + span
+def cell_index(start: Int, window: Int, sequence_length: Int) -> Int:
+    """Row-major over `(start, window)`, with one column of slack so `window = sequence_length` fits."""
+    return start * (sequence_length + 2) + window
 
 
 @always_inline
 def interior_end_floor(start: Int, end: Int, inner_start: Int) -> Int:
     """The earliest inner end that keeps the loop within `MAX_LOOP` unpaired bases."""
-    var left = inner_start - start - 1
-    var floor = end - 1 - (MAX_LOOP - left)
+    var unpaired_before = inner_start - start - 1
+    var floor = end - 1 - (MAX_LOOP - unpaired_before)
     return max(floor, inner_start + MIN_HAIRPIN + 1)
 
 
@@ -342,173 +354,293 @@ def interior_end_floor(start: Int, end: Int, inner_start: Int) -> Int:
 
 
 @fieldwise_init
-struct FoldTables(Copyable, Movable):
-    """The three tables one fold fills, flat and indexed by `cell_index`."""
+struct PartnerRuns(Copyable, Movable):
+    """Where each letter's possible partners sit in the sequence, one ascending run per letter."""
 
-    var paired: List[Scalar[ENERGY_DTYPE]]
-    """Best energy of a span whose two ends pair with each other."""
-    var multiloop: List[Scalar[ENERGY_DTYPE]]
-    """Best energy of a span sitting inside a multibranched loop, holding at least one helix."""
-    var external: List[Scalar[ENERGY_DTYPE]]
-    """Best energy of a span with nothing enclosing it, where unpaired bases are free."""
+    var positions: List[Scalar[PositionDType]]
+    """Every position that can close a pair, the letters' runs laid end to end."""
+    var bounds: List[Scalar[PositionDType]]
+    """Letter `c`'s run at its first entry from `t` onwards, held at `c * (sequence_length + 1) + t`."""
+
+
+@fieldwise_init
+struct PartnerRange(ImplicitlyCopyable, TrivialRegisterPassable):
+    """Half-open slice of one letter's run, covering the partners one window can reach."""
+
+    var low: Int
+    """First entry of the run that lands inside the window."""
+    var high: Int
+    """One past the run's last entry inside the window."""
+
+
+def partner_runs(
+    sequence: ImmSpan[Scalar[SymbolDType], _], energy_model: ImmSpan[Scalar[EnergyDType], _], alphabet_size: Int
+) -> PartnerRuns:
+    """Lists, per letter, every position in the sequence that letter can close a pair with."""
+    var sequence_length = len(sequence)
+    var positions = List[Scalar[PositionDType]]()
+    var bounds = List[Scalar[PositionDType]](
+        length=alphabet_size * (sequence_length + 1), fill=Scalar[PositionDType](0)
+    )
+    var energy_model_pointer = energy_model.unsafe_ptr()
+    for letter in range(alphabet_size):
+        for position in range(sequence_length):
+            bounds[letter * (sequence_length + 1) + position] = Scalar[PositionDType](len(positions))
+            if is_pair(pair_of(energy_model_pointer, letter, Int(sequence[position]))):
+                positions.append(Scalar[PositionDType](position))
+        bounds[letter * (sequence_length + 1) + sequence_length] = Scalar[PositionDType](len(positions))
+    return PartnerRuns(positions^, bounds^)
+
+
+@always_inline
+def reachable_partners(
+    bounds: Pointer[Scalar[PositionDType], _], head: Int, sequence_length: Int, start: Int, window: Int
+) -> PartnerRange:
+    """The slice of `head`'s run this window can close a helix with.
+
+    The short-window guard is load-bearing rather than an optimization: without it the threshold
+    can run past the end of `bounds`.
+    """
+    if window < MIN_HELIX_SPAN:
+        return PartnerRange(0, 0)
+    var run = head * (sequence_length + 1)
+    return PartnerRange(
+        Int(bounds[unsafe_offset=run + start + MIN_HELIX_SPAN - 1]),
+        Int(bounds[unsafe_offset=run + start + window]),
+    )
+
+
+@always_inline
+def branch_energy(
+    sequence: Pointer[Scalar[SymbolDType], _],
+    energy_model: Pointer[Scalar[EnergyDType], _],
+    paired: Pointer[Scalar[EnergyDType], _],
+    sequence_length: Int,
+    start: Int,
+    partner: Int,
+) -> Int32:
+    """One helix placed as a branch: what it encloses, its helix-end penalty and its dangles.
+
+    A pure function of where the helix starts and ends, never of what encloses it, which is why
+    the sweep stores it once per window instead of recomputing it once per candidate. The forbidden
+    case returns early, because adding the penalties to the sentinel would drift it below itself.
+    """
+    var closed = paired[unsafe_offset=cell_index(start, partner - start + 1, sequence_length)]
+    if closed >= FORBIDDEN:
+        return FORBIDDEN
+    var pair = pair_of(energy_model, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=partner]))
+    return closed + terminal_penalty(pair) + dangle_energy(sequence, energy_model, start, partner, sequence_length)
+
+
+@fieldwise_init
+struct FoldTables(Copyable, Movable):
+    """The four energy_model one fold fills, flat and indexed by `cell_index`."""
+
+    var paired: List[Scalar[EnergyDType]]
+    """Best energy of a window whose two ends pair with each other."""
+    var multiloop: List[Scalar[EnergyDType]]
+    """Best energy of a window inside a multibranched loop, holding at least one helix."""
+    var closable: List[Scalar[EnergyDType]]
+    """The same, holding at least two, which is what a closing pair may enclose."""
+    var external: List[Scalar[EnergyDType]]
+    """Best energy of a window with nothing enclosing it, where unpaired bases are free."""
 
 
 @always_inline
 def paired_cell(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], _],
-    tables: Pointer[Scalar[ENERGY_DTYPE], _],
-    paired: Pointer[Scalar[ENERGY_DTYPE], _],
-    multiloop: Pointer[Scalar[ENERGY_DTYPE], _],
-    length: Int,
+    sequence: Pointer[Scalar[SymbolDType], _],
+    energy_model: Pointer[Scalar[EnergyDType], _],
+    paired: Pointer[Scalar[EnergyDType], _],
+    closable: Pointer[Scalar[EnergyDType], _],
+    sequence_length: Int,
     start: Int,
-    span: Int,
+    window: Int,
 ) -> Int32:
-    """The hairpin and interior-loop cases of one `paired` cell, and optionally its multiloop.
-
-    The multiloop closure is a linear scan over split points, which the device gives to its whole
-    block; `interior_only` lets that caller take the bounded interior scan alone.
-    """
-    var end = start + span - 1
-    var pair = pair_of(tables, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
-    if not pairs(pair) or span < MIN_HAIRPIN + 2:
+    """Every case of one `paired` cell: the hairpin, the interior loops, and the multiloop closure."""
+    var end = start + window - 1
+    var pair = pair_of(energy_model, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
+    if not is_pair(pair) or window < MIN_HELIX_SPAN:
         return FORBIDDEN
 
-    var best = hairpin_energy(sequence, tables, start, end)
+    var best = hairpin_energy(sequence, energy_model, start, end)
     for inner_start in range(start + 1, end):
         if inner_start - start - 1 > MAX_LOOP:
             break
         for inner_end in range(interior_end_floor(start, end, inner_start), end):
-            var inner_span = inner_end - inner_start + 1
-            if inner_span < MIN_HAIRPIN + 2:
+            var inner_window = inner_end - inner_start + 1
+            if inner_window < MIN_HELIX_SPAN:
                 continue
-            var nested = paired[unsafe_offset=cell_index(inner_start, inner_span, length)]
+            var nested = paired[unsafe_offset=cell_index(inner_start, inner_window, sequence_length)]
             if nested >= FORBIDDEN:
                 continue
-            var loop = interior_energy(sequence, tables, start, end, inner_start, inner_end)
+            var loop = interior_energy(sequence, energy_model, start, end, inner_start, inner_end)
             if loop < FORBIDDEN:
                 best = min(best, loop + nested)
 
-    var closure = MULTILOOP_OFFSET + MULTILOOP_PER_HELIX + terminal_penalty(pair)
-    for split in range(start + 2, end - 1):
-        var left = multiloop[unsafe_offset=cell_index(start + 1, split - start - 1, length)]
-        var right = multiloop[unsafe_offset=cell_index(split, end - split, length)]
-        if left < FORBIDDEN and right < FORBIDDEN:
-            best = min(best, left + right + closure)
+    var interior = closable[unsafe_offset=cell_index(start + 1, window - 2, sequence_length)]
+    if interior < FORBIDDEN:
+        best = min(best, interior + MULTILOOP_OFFSET + MULTILOOP_PER_HELIX + terminal_penalty(pair))
     return best
 
 
 @always_inline
-def multiloop_seed(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], _],
-    tables: Pointer[Scalar[ENERGY_DTYPE], _],
-    paired: Pointer[Scalar[ENERGY_DTYPE], _],
-    multiloop: Pointer[Scalar[ENERGY_DTYPE], _],
-    length: Int,
+def multiloop_cell(
+    sequence: Pointer[Scalar[SymbolDType], _],
+    branch_placed: Pointer[Scalar[EnergyDType], _],
+    multiloop: Pointer[Scalar[EnergyDType], _],
+    positions: Pointer[Scalar[PositionDType], _],
+    bounds: Pointer[Scalar[PositionDType], _],
+    sequence_length: Int,
     start: Int,
-    span: Int,
+    window: Int,
 ) -> Int32:
-    """A `multiloop` cell before its split scan: this span closing a helix, or trimmed by a base.
-
-    The split scan stays with the caller because its shape is a serial loop on the host and a
-    strided block reduction on the device.
-    """
-    var end = start + span - 1
-    var here = cell_index(start, span, length)
+    """One `multiloop` cell, at least one branch: the head unpaired inside the loop, or opening one."""
+    var end = start + window - 1
     var best = FORBIDDEN
-    var closed = paired[unsafe_offset=here]
-    if closed < FORBIDDEN:
-        var pair = pair_of(tables, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
-        best = closed + MULTILOOP_PER_HELIX + terminal_penalty(pair)
-        best += dangle_energy(sequence, tables, start, end, length)
-    if span > 1:
-        var left_trimmed = multiloop[unsafe_offset=cell_index(start + 1, span - 1, length)]
-        if left_trimmed < FORBIDDEN:
-            best = min(best, left_trimmed + MULTILOOP_PER_UNPAIRED)
-        var right_trimmed = multiloop[unsafe_offset=cell_index(start, span - 1, length)]
-        if right_trimmed < FORBIDDEN:
-            best = min(best, right_trimmed + MULTILOOP_PER_UNPAIRED)
+    if window > 1:
+        var trimmed = multiloop[unsafe_offset=cell_index(start + 1, window - 1, sequence_length)]
+        if trimmed < FORBIDDEN:
+            best = min(best, trimmed + MULTILOOP_PER_UNPAIRED)
+    var reach = reachable_partners(bounds, Int(sequence[unsafe_offset=start]), sequence_length, start, window)
+    for index in range(reach.high - 1, reach.low - 1, -1):
+        var partner = Int(positions[unsafe_offset=index])
+        var branch = branch_placed[unsafe_offset=cell_index(start, partner - start + 1, sequence_length)]
+        if branch >= FORBIDDEN:
+            continue
+        branch += MULTILOOP_PER_HELIX
+        var tail = end - partner
+        # Nothing more is_pair after this branch, which also covers a tail of no bases at all.
+        best = min(best, branch + MULTILOOP_PER_UNPAIRED * Int32(tail))
+        var following = multiloop[unsafe_offset=cell_index(partner + 1, tail, sequence_length)]
+        if following < FORBIDDEN:
+            best = min(best, branch + following)
     return best
 
 
 @always_inline
-def external_seed(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], _],
-    tables: Pointer[Scalar[ENERGY_DTYPE], _],
-    paired: Pointer[Scalar[ENERGY_DTYPE], _],
-    external: Pointer[Scalar[ENERGY_DTYPE], _],
-    length: Int,
+def multiloop_closable_cell(
+    sequence: Pointer[Scalar[SymbolDType], _],
+    branch_placed: Pointer[Scalar[EnergyDType], _],
+    multiloop: Pointer[Scalar[EnergyDType], _],
+    closable: Pointer[Scalar[EnergyDType], _],
+    positions: Pointer[Scalar[PositionDType], _],
+    bounds: Pointer[Scalar[PositionDType], _],
+    sequence_length: Int,
     start: Int,
-    span: Int,
+    window: Int,
 ) -> Int32:
-    """An `external` cell before its split scan, where unpaired bases are free."""
-    var end = start + span - 1
-    var here = cell_index(start, span, length)
-    var best = Int32(0)
-    if span > 1:
-        best = min(
-            external[unsafe_offset=cell_index(start + 1, span - 1, length)],
-            external[unsafe_offset=cell_index(start, span - 1, length)],
-        )
-    var closed = paired[unsafe_offset=here]
-    if closed < FORBIDDEN:
-        var pair = pair_of(tables, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
-        var placed = closed + terminal_penalty(pair)
-        placed += dangle_energy(sequence, tables, start, end, length)
-        best = min(best, placed)
+    """One `closable` cell, at least two branches, which is what a closing pair may enclose.
+
+    The only difference from `multiloop_cell` is the absent all-unpaired tail, and that absence is
+    the whole mechanism by which Zuker's two-branch rule stays enforced.
+    """
+    var end = start + window - 1
+    var best = FORBIDDEN
+    if window > 1:
+        var trimmed = closable[unsafe_offset=cell_index(start + 1, window - 1, sequence_length)]
+        if trimmed < FORBIDDEN:
+            best = min(best, trimmed + MULTILOOP_PER_UNPAIRED)
+    var reach = reachable_partners(bounds, Int(sequence[unsafe_offset=start]), sequence_length, start, window)
+    for index in range(reach.high - 1, reach.low - 1, -1):
+        var partner = Int(positions[unsafe_offset=index])
+        var branch = branch_placed[unsafe_offset=cell_index(start, partner - start + 1, sequence_length)]
+        if branch >= FORBIDDEN:
+            continue
+        branch += MULTILOOP_PER_HELIX
+        var following = multiloop[unsafe_offset=cell_index(partner + 1, end - partner, sequence_length)]
+        if following < FORBIDDEN:
+            best = min(best, branch + following)
+    return best
+
+
+@always_inline
+def external_cell(
+    sequence: Pointer[Scalar[SymbolDType], _],
+    branch_placed: Pointer[Scalar[EnergyDType], _],
+    external: Pointer[Scalar[EnergyDType], _],
+    positions: Pointer[Scalar[PositionDType], _],
+    bounds: Pointer[Scalar[PositionDType], _],
+    sequence_length: Int,
+    start: Int,
+    window: Int,
+) -> Int32:
+    """One `external` cell: the head unpaired and free, or the head opening the leftmost helix."""
+    var end = start + window - 1
+    var best = external[unsafe_offset=cell_index(start + 1, window - 1, sequence_length)]
+    var reach = reachable_partners(bounds, Int(sequence[unsafe_offset=start]), sequence_length, start, window)
+    for index in range(reach.high - 1, reach.low - 1, -1):
+        var partner = Int(positions[unsafe_offset=index])
+        var branch = branch_placed[unsafe_offset=cell_index(start, partner - start + 1, sequence_length)]
+        if branch >= FORBIDDEN:
+            continue
+        best = min(best, branch + external[unsafe_offset=cell_index(partner + 1, end - partner, sequence_length)])
     return best
 
 
 def serial_fold_tables(
-    sequence: ImmSpan[Scalar[SYMBOL_DTYPE], _], tables: ImmSpan[Scalar[ENERGY_DTYPE], _]
+    sequence: ImmSpan[Scalar[SymbolDType], _], energy_model: ImmSpan[Scalar[EnergyDType], _]
 ) raises -> FoldTables:
-    """Fills the three tables on the host, in increasing span and in dependency order inside one."""
-    var length = len(sequence)
-    var cells = (length + 1) * (length + 2)
-    var paired = List[Scalar[ENERGY_DTYPE]](length=cells, fill=FORBIDDEN)
-    var multiloop = List[Scalar[ENERGY_DTYPE]](length=cells, fill=FORBIDDEN)
-    var external = List[Scalar[ENERGY_DTYPE]](length=cells, fill=Scalar[ENERGY_DTYPE](0))
+    """Fills the four energy_model on the host, in increasing window and in dependency order inside one."""
+    var sequence_length = len(sequence)
+    var cells = (sequence_length + 1) * (sequence_length + 2)
+    var paired = List[Scalar[EnergyDType]](length=cells, fill=FORBIDDEN)
+    var multiloop = List[Scalar[EnergyDType]](length=cells, fill=FORBIDDEN)
+    var closable = List[Scalar[EnergyDType]](length=cells, fill=FORBIDDEN)
+    var external = List[Scalar[EnergyDType]](length=cells, fill=Scalar[EnergyDType](0))
+    var branch_placed = List[Scalar[EnergyDType]](length=cells, fill=FORBIDDEN)
+    var runs = partner_runs(sequence, energy_model, RNA_ALPHABET_SIZE)
     var sequence_pointer = sequence.unsafe_ptr()
-    var tables_pointer = tables.unsafe_ptr()
+    var energy_model_pointer = energy_model.unsafe_ptr()
     var paired_pointer = paired.unsafe_ptr()
     var multiloop_pointer = multiloop.unsafe_ptr()
+    var closable_pointer = closable.unsafe_ptr()
     var external_pointer = external.unsafe_ptr()
+    var branch_pointer = branch_placed.unsafe_ptr()
+    var positions = runs.positions.unsafe_ptr()
+    var bounds = runs.bounds.unsafe_ptr()
 
-    for span in range(1, length + 1):
-        for start in range(0, length - span + 1):
-            var here = cell_index(start, span, length)
+    for window in range(1, sequence_length + 1):
+        for start in range(0, sequence_length - window + 1):
+            var here = cell_index(start, window, sequence_length)
             paired[here] = paired_cell(
+                sequence_pointer, energy_model_pointer, paired_pointer, closable_pointer, sequence_length, start, window
+            )
+            branch_placed[here] = branch_energy(
+                sequence_pointer, energy_model_pointer, paired_pointer, sequence_length, start, start + window - 1
+            )
+            multiloop[here] = multiloop_cell(
                 sequence_pointer,
-                tables_pointer,
-                paired_pointer,
+                branch_pointer,
                 multiloop_pointer,
-                length,
+                positions,
+                bounds,
+                sequence_length,
                 start,
-                span,
+                window,
+            )
+            closable[here] = multiloop_closable_cell(
+                sequence_pointer,
+                branch_pointer,
+                multiloop_pointer,
+                closable_pointer,
+                positions,
+                bounds,
+                sequence_length,
+                start,
+                window,
+            )
+            external[here] = external_cell(
+                sequence_pointer,
+                branch_pointer,
+                external_pointer,
+                positions,
+                bounds,
+                sequence_length,
+                start,
+                window,
             )
 
-            var best = multiloop_seed(
-                sequence_pointer, tables_pointer, paired_pointer, multiloop_pointer, length, start, span
-            )
-            if span > 1:
-                for split in range(1, span):
-                    var left = multiloop[cell_index(start, split, length)]
-                    var right = multiloop[cell_index(start + split, span - split, length)]
-                    if left < FORBIDDEN and right < FORBIDDEN:
-                        best = min(best, left + right)
-            multiloop[here] = best
-
-            var outside = external_seed(
-                sequence_pointer, tables_pointer, paired_pointer, external_pointer, length, start, span
-            )
-            for split in range(1, span):
-                outside = min(
-                    outside,
-                    external[cell_index(start, split, length)]
-                    + external[cell_index(start + split, span - split, length)],
-                )
-            external[here] = outside
-
-    return FoldTables(paired^, multiloop^, external^)
+    return FoldTables(paired^, multiloop^, closable^, external^)
 
 
 # endregion Serial Reference
@@ -524,210 +656,218 @@ corner keeps the thread mapping a division rather than a search.
 
 @always_inline
 def block_min(
-    reduction: Pointer[Scalar[ENERGY_DTYPE], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
+    warp_totals: Pointer[Scalar[EnergyDType], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
     best: Int32,
 ) -> Int32:
-    """Block-wide minimum, left in every thread so the caller needs no second barrier."""
-    reduction[unsafe_offset=Int(thread_idx.x)] = best
+    """Block-wide minimum in two stages, unpaired_before in every thread so the caller needs no second barrier.
+
+    Each warp collapses to one value through registers, so the shared array is one entry per warp
+    and the whole block crosses a single barrier rather than one per level of a tree.
+    """
+    var reduced = warp_min(best)
+    if Int(thread_idx.x) % WARP_SIZE == 0:
+        warp_totals[unsafe_offset=Int(thread_idx.x) // WARP_SIZE] = reduced
     barrier()
-    var span = THREADS_PER_BLOCK // 2
-    while span > 0:
-        if Int(thread_idx.x) < span:
-            reduction[unsafe_offset=Int(thread_idx.x)] = min(
-                reduction[unsafe_offset=Int(thread_idx.x)],
-                reduction[unsafe_offset=Int(thread_idx.x) + span],
-            )
-        barrier()
-        span //= 2
-    return reduction[unsafe_offset=0]
+    var combined = warp_totals[unsafe_offset=0]
+    for index in range(1, WARPS_PER_BLOCK):
+        combined = min(combined, warp_totals[unsafe_offset=index])
+    return combined
 
 
 def paired_kernel(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], MutAnyOrigin],
-    tables: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    paired: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    multiloop: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    length_in: Int32,
-    span_in: Int32,
+    sequence: Pointer[Scalar[SymbolDType], MutAnyOrigin],
+    energy_model: Pointer[Scalar[EnergyDType], MutAnyOrigin],
+    paired: Pointer[Scalar[EnergyDType], MutAnyOrigin],
+    closable: Pointer[Scalar[EnergyDType], MutAnyOrigin],
+    branch_placed: Pointer[Scalar[EnergyDType], MutAnyOrigin],
+    sequence_length_in: Int32,
+    window_in: Int32,
 ):
-    """One block per `paired` cell of the span, threads splitting both of its scans."""
-    var length = Int(length_in)
-    var span = Int(span_in)
-    var start = Int(block_idx.x)
-    if start + span > length:
-        return
-    var end = start + span - 1
-    var here = cell_index(start, span, length)
+    """One block per `paired` cell, threads splitting its interior-loop triangle.
 
-    var reduction = stack_allocation[THREADS_PER_BLOCK, Scalar[ENERGY_DTYPE], address_space=AddressSpace.SHARED]()
-    var pair = pair_of(tables, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
-    if not pairs(pair) or span < MIN_HAIRPIN + 2:
+    The multiloop closure is a single read now that a table holds spans of two branches or more,
+    so the only scan unpaired_before here is the bounded one.
+    """
+    var sequence_length = Int(sequence_length_in)
+    var window = Int(window_in)
+    var start = Int(block_idx.x)
+    if start + window > sequence_length:
+        return
+    var end = start + window - 1
+    var here = cell_index(start, window, sequence_length)
+    var warp_totals = stack_allocation[WARPS_PER_BLOCK, Scalar[EnergyDType], address_space=AddressSpace.SHARED]()
+
+    var pair = pair_of(energy_model, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
+    if not is_pair(pair) or window < MIN_HELIX_SPAN:
         if thread_idx.x == 0:
             paired[unsafe_offset=here] = FORBIDDEN
+            branch_placed[unsafe_offset=here] = FORBIDDEN
         return
 
     var best = FORBIDDEN
     if thread_idx.x == 0:
-        best = hairpin_energy(sequence, tables, start, end)
+        best = hairpin_energy(sequence, energy_model, start, end)
+        var interior = closable[unsafe_offset=cell_index(start + 1, window - 2, sequence_length)]
+        if interior < FORBIDDEN:
+            best = min(best, interior + MULTILOOP_OFFSET + MULTILOOP_PER_HELIX + terminal_penalty(pair))
 
     for combined in range(Int(thread_idx.x), INTERIOR_COMBINATIONS, THREADS_PER_BLOCK):
-        var left = combined // (MAX_LOOP + 1)
-        var right = combined % (MAX_LOOP + 1)
-        if left + right > MAX_LOOP:
+        var before = combined // (MAX_LOOP + 1)
+        var after = combined % (MAX_LOOP + 1)
+        if before + after > MAX_LOOP:
             continue
-        var inner_start = start + 1 + left
-        var inner_end = end - 1 - right
-        var inner_span = inner_end - inner_start + 1
-        if inner_span < MIN_HAIRPIN + 2 or inner_start >= inner_end:
+        var inner_start = start + 1 + before
+        var inner_end = end - 1 - after
+        var inner_window = inner_end - inner_start + 1
+        if inner_window < MIN_HELIX_SPAN or inner_start >= inner_end:
             continue
-        var nested = paired[unsafe_offset=cell_index(inner_start, inner_span, length)]
+        var nested = paired[unsafe_offset=cell_index(inner_start, inner_window, sequence_length)]
         if nested >= FORBIDDEN:
             continue
-        var loop = interior_energy(sequence, tables, start, end, inner_start, inner_end)
+        var loop = interior_energy(sequence, energy_model, start, end, inner_start, inner_end)
         if loop < FORBIDDEN:
             best = min(best, loop + nested)
 
-    var closure = MULTILOOP_OFFSET + MULTILOOP_PER_HELIX + terminal_penalty(pair)
-    for split in range(start + 2 + Int(thread_idx.x), end - 1, THREADS_PER_BLOCK):
-        var left = multiloop[unsafe_offset=cell_index(start + 1, split - start - 1, length)]
-        var right = multiloop[unsafe_offset=cell_index(split, end - split, length)]
-        if left < FORBIDDEN and right < FORBIDDEN:
-            best = min(best, left + right + closure)
-
-    var answer = block_min(reduction, best)
+    var answer = block_min(warp_totals, best)
     if thread_idx.x == 0:
         paired[unsafe_offset=here] = answer
+        # Stored beside the cell it derives from, so the branching sweep reads a placement rather
+        # than rebuilding one for every candidate it weighs.
+        var placed = FORBIDDEN
+        if answer < FORBIDDEN:
+            placed = (
+                answer + terminal_penalty(pair) + dangle_energy(sequence, energy_model, start, end, sequence_length)
+            )
+        branch_placed[unsafe_offset=here] = placed
 
 
-def multiloop_kernel(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], MutAnyOrigin],
-    tables: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    paired: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    multiloop: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    length_in: Int32,
-    span_in: Int32,
+def branching_kernel(
+    sequence: Pointer[Scalar[SymbolDType], MutAnyOrigin],
+    branch_placed: Pointer[Scalar[EnergyDType], MutAnyOrigin],
+    multiloop: Pointer[Scalar[EnergyDType], MutAnyOrigin],
+    closable: Pointer[Scalar[EnergyDType], MutAnyOrigin],
+    external: Pointer[Scalar[EnergyDType], MutAnyOrigin],
+    positions: Pointer[Scalar[PositionDType], MutAnyOrigin],
+    bounds: Pointer[Scalar[PositionDType], MutAnyOrigin],
+    sequence_length_in: Int32,
+    window_in: Int32,
 ):
-    """One block per `multiloop` cell, which reads `paired` at the same span."""
-    var length = Int(length_in)
-    var span = Int(span_in)
-    var start = Int(block_idx.x)
-    if start + span > length:
-        return
-    var end = start + span - 1
-    var here = cell_index(start, span, length)
+    """One block per cell of the three energy_model a closing pair does not enclose.
 
-    var reduction = stack_allocation[THREADS_PER_BLOCK, Scalar[ENERGY_DTYPE], address_space=AddressSpace.SHARED]()
+    All three read `paired` at their own window and none reads another at the same window, so one
+    launch fills them and `block_idx.y` names which. That is two launches per window rather than
+    four, which is what binds at short spans.
+    """
+    var sequence_length = Int(sequence_length_in)
+    var window = Int(window_in)
+    var start = Int(block_idx.x)
+    if start + window > sequence_length:
+        return
+    var end = start + window - 1
+    var here = cell_index(start, window, sequence_length)
+    var filling = TableName(UInt8(block_idx.y) + TableName.MULTILOOP.identifier)
+    var warp_totals = stack_allocation[WARPS_PER_BLOCK, Scalar[EnergyDType], address_space=AddressSpace.SHARED]()
+
     var best = FORBIDDEN
     if thread_idx.x == 0:
-        best = multiloop_seed(sequence, tables, paired, multiloop, length, start, span)
+        if filling == TableName.EXTERNAL:
+            best = external[unsafe_offset=cell_index(start + 1, window - 1, sequence_length)]
+        elif window > 1:
+            var holding = multiloop if filling == TableName.MULTILOOP else closable
+            var trimmed = holding[unsafe_offset=cell_index(start + 1, window - 1, sequence_length)]
+            if trimmed < FORBIDDEN:
+                best = trimmed + MULTILOOP_PER_UNPAIRED
 
-    for split in range(1 + Int(thread_idx.x), span, THREADS_PER_BLOCK):
-        var left = multiloop[unsafe_offset=cell_index(start, split, length)]
-        var right = multiloop[unsafe_offset=cell_index(start + split, span - split, length)]
-        if left < FORBIDDEN and right < FORBIDDEN:
-            best = min(best, left + right)
+    var reach = reachable_partners(bounds, Int(sequence[unsafe_offset=start]), sequence_length, start, window)
+    for index in range(reach.low + Int(thread_idx.x), reach.high, THREADS_PER_BLOCK):
+        var partner = Int(positions[unsafe_offset=index])
+        var branch = branch_placed[unsafe_offset=cell_index(start, partner - start + 1, sequence_length)]
+        if branch >= FORBIDDEN:
+            continue
+        var tail = end - partner
+        if filling == TableName.EXTERNAL:
+            best = min(best, branch + external[unsafe_offset=cell_index(partner + 1, tail, sequence_length)])
+            continue
+        branch += MULTILOOP_PER_HELIX
+        if filling == TableName.MULTILOOP:
+            best = min(best, branch + MULTILOOP_PER_UNPAIRED * Int32(tail))
+        var following = multiloop[unsafe_offset=cell_index(partner + 1, tail, sequence_length)]
+        if following < FORBIDDEN:
+            best = min(best, branch + following)
 
-    var answer = block_min(reduction, best)
+    var answer = block_min(warp_totals, best)
     if thread_idx.x == 0:
-        multiloop[unsafe_offset=here] = answer
-
-
-def external_kernel(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], MutAnyOrigin],
-    tables: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    paired: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    external: Pointer[Scalar[ENERGY_DTYPE], MutAnyOrigin],
-    length_in: Int32,
-    span_in: Int32,
-):
-    """One block per `external` cell, where unpaired bases are free."""
-    var length = Int(length_in)
-    var span = Int(span_in)
-    var start = Int(block_idx.x)
-    if start + span > length:
-        return
-    var end = start + span - 1
-    var here = cell_index(start, span, length)
-
-    var reduction = stack_allocation[THREADS_PER_BLOCK, Scalar[ENERGY_DTYPE], address_space=AddressSpace.SHARED]()
-    var best = FORBIDDEN
-    if thread_idx.x == 0:
-        best = external_seed(sequence, tables, paired, external, length, start, span)
-
-    for split in range(1 + Int(thread_idx.x), span, THREADS_PER_BLOCK):
-        best = min(
-            best,
-            external[unsafe_offset=cell_index(start, split, length)]
-            + external[unsafe_offset=cell_index(start + split, span - split, length)],
-        )
-
-    var answer = block_min(reduction, best)
-    if thread_idx.x == 0:
-        external[unsafe_offset=here] = answer
+        if filling == TableName.MULTILOOP:
+            multiloop[unsafe_offset=here] = answer
+        elif filling == TableName.CLOSABLE:
+            closable[unsafe_offset=here] = answer
+        else:
+            external[unsafe_offset=here] = answer
 
 
 def device_fold_tables(
-    ctx: DeviceContext,
-    sequence: ImmSpan[Scalar[SYMBOL_DTYPE], _],
-    tables: ImmSpan[Scalar[ENERGY_DTYPE], _],
+    ctx: DeviceContext, sequence: ImmSpan[Scalar[SymbolDType], _], energy_model: ImmSpan[Scalar[EnergyDType], _]
 ) raises -> FoldTables:
-    """Sweeps the three tables on the device, three launches per span.
+    """Sweeps the four energy_model on the device, two launches per window.
 
-    `multiloop` and `external` read `paired` at their own span, so they cannot share a launch
-    with it; every other dependency is on a strictly shorter span and needs no ordering.
+    `paired` reads `closable` at a strictly shorter window, and the other three read `paired` at
+    their own, so the closing table goes first and the three unenclosed ones share a launch.
     """
-    var length = len(sequence)
-    var cells = (length + 1) * (length + 2)
+    var sequence_length = len(sequence)
+    var cells = (sequence_length + 1) * (sequence_length + 2)
+    var runs = partner_runs(sequence, energy_model, RNA_ALPHABET_SIZE)
 
-    var sequence_buffer = upload[SYMBOL_DTYPE](ctx, sequence)
-    var tables_buffer = upload[ENERGY_DTYPE](ctx, tables)
-    var paired_buffer = ctx.enqueue_create_buffer[ENERGY_DTYPE](cells)
-    var multiloop_buffer = ctx.enqueue_create_buffer[ENERGY_DTYPE](cells)
-    var external_buffer = zeroed[ENERGY_DTYPE](ctx, cells)
+    var sequence_buffer = upload[SymbolDType](ctx, sequence)
+    var energy_model_buffer = upload[EnergyDType](ctx, energy_model)
+    var positions_buffer = upload[PositionDType](ctx, Span(runs.positions))
+    var bounds_buffer = upload[PositionDType](ctx, Span(runs.bounds))
+    var paired_buffer = ctx.enqueue_create_buffer[EnergyDType](cells)
+    var multiloop_buffer = ctx.enqueue_create_buffer[EnergyDType](cells)
+    var closable_buffer = ctx.enqueue_create_buffer[EnergyDType](cells)
+    var external_buffer = zeroed[EnergyDType](ctx, cells)
+    var branch_buffer = ctx.enqueue_create_buffer[EnergyDType](cells)
     ctx.enqueue_memset(paired_buffer, FORBIDDEN)
     ctx.enqueue_memset(multiloop_buffer, FORBIDDEN)
+    ctx.enqueue_memset(closable_buffer, FORBIDDEN)
+    ctx.enqueue_memset(branch_buffer, FORBIDDEN)
 
-    for span in range(1, length + 1):
+    for window in range(1, sequence_length + 1):
         ctx.enqueue_function[paired_kernel](
             sequence_buffer.unsafe_ptr(),
-            tables_buffer.unsafe_ptr(),
+            energy_model_buffer.unsafe_ptr(),
             paired_buffer.unsafe_ptr(),
-            multiloop_buffer.unsafe_ptr(),
-            Int32(length),
-            Int32(span),
-            grid_dim=length,
+            closable_buffer.unsafe_ptr(),
+            branch_buffer.unsafe_ptr(),
+            Int32(sequence_length),
+            Int32(window),
+            grid_dim=sequence_length - window + 1,
             block_dim=THREADS_PER_BLOCK,
         )
-        ctx.enqueue_function[multiloop_kernel](
+        ctx.enqueue_function[branching_kernel](
             sequence_buffer.unsafe_ptr(),
-            tables_buffer.unsafe_ptr(),
-            paired_buffer.unsafe_ptr(),
+            branch_buffer.unsafe_ptr(),
             multiloop_buffer.unsafe_ptr(),
-            Int32(length),
-            Int32(span),
-            grid_dim=length,
-            block_dim=THREADS_PER_BLOCK,
-        )
-        ctx.enqueue_function[external_kernel](
-            sequence_buffer.unsafe_ptr(),
-            tables_buffer.unsafe_ptr(),
-            paired_buffer.unsafe_ptr(),
+            closable_buffer.unsafe_ptr(),
             external_buffer.unsafe_ptr(),
-            Int32(length),
-            Int32(span),
-            grid_dim=length,
+            positions_buffer.unsafe_ptr(),
+            bounds_buffer.unsafe_ptr(),
+            Int32(sequence_length),
+            Int32(window),
+            grid_dim=(sequence_length - window + 1, 3),
             block_dim=THREADS_PER_BLOCK,
         )
     ctx.synchronize()
 
-    var paired = List[Scalar[ENERGY_DTYPE]](length=cells, fill=FORBIDDEN)
-    var multiloop = List[Scalar[ENERGY_DTYPE]](length=cells, fill=FORBIDDEN)
-    var external = List[Scalar[ENERGY_DTYPE]](length=cells, fill=Scalar[ENERGY_DTYPE](0))
+    var paired = List[Scalar[EnergyDType]](length=cells, fill=FORBIDDEN)
+    var multiloop = List[Scalar[EnergyDType]](length=cells, fill=FORBIDDEN)
+    var closable = List[Scalar[EnergyDType]](length=cells, fill=FORBIDDEN)
+    var external = List[Scalar[EnergyDType]](length=cells, fill=Scalar[EnergyDType](0))
     ctx.enqueue_copy(paired.unsafe_ptr(), paired_buffer)
     ctx.enqueue_copy(multiloop.unsafe_ptr(), multiloop_buffer)
+    ctx.enqueue_copy(closable.unsafe_ptr(), closable_buffer)
     ctx.enqueue_copy(external.unsafe_ptr(), external_buffer)
     ctx.synchronize()
-    return FoldTables(paired^, multiloop^, external^)
+    return FoldTables(paired^, multiloop^, closable^, external^)
 
 
 # endregion GPU Sweep
@@ -736,163 +876,159 @@ def device_fold_tables(
 
 
 @fieldwise_init
-struct FoldTable(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """Which of the three tables a pending traceback item belongs to."""
+struct TableName(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """Which of the three energy_model a pending traceback item belongs to."""
 
     var identifier: UInt8
     """Which table this names."""
     comptime PAIRED = Self(0)
-    """The span's two ends form a pair."""
+    """The window's two ends form a pair."""
     comptime MULTILOOP = Self(1)
-    """The span lies inside a multibranched loop."""
+    """The window lies inside a multibranched loop."""
     comptime EXTERNAL = Self(2)
-    """The span is not enclosed by any pair."""
+    """A window with nothing enclosing it."""
+    comptime CLOSABLE = Self(3)
+    """The window is not enclosed by any pair."""
 
 
 @fieldwise_init
-struct FoldStep(ImplicitlyCopyable, TrivialRegisterPassable):
-    """A span still to be decomposed, and which table it was reached through."""
+struct PendingWindow(ImplicitlyCopyable, TrivialRegisterPassable):
+    """A window still to be decomposed, and which table it was reached through."""
 
-    var table: FoldTable
-    """Which table this span was reached through, and so which cases apply to it."""
+    var table: TableName
+    """Which table this window was reached through, and so which cases apply to it."""
     var start: Int32
-    """First position of the span."""
-    var span: Int32
+    """First position of the window."""
+    var window: Int32
     """How many positions it covers."""
 
 
 @always_inline
 def winning_interior(
-    sequence: Pointer[Scalar[SYMBOL_DTYPE], _],
-    tables: Pointer[Scalar[ENERGY_DTYPE], _],
-    paired: Pointer[Scalar[ENERGY_DTYPE], _],
-    length: Int,
+    sequence: Pointer[Scalar[SymbolDType], _],
+    energy_model: Pointer[Scalar[EnergyDType], _],
+    paired: Pointer[Scalar[EnergyDType], _],
+    sequence_length: Int,
     start: Int,
-    span: Int,
-) -> FoldStep:
-    """The nested pair whose interior loop reproduces a `paired` cell, or a negative span for none."""
-    var end = start + span - 1
-    var stored = paired[unsafe_offset=cell_index(start, span, length)]
+    window: Int,
+) -> PendingWindow:
+    """The nested pair whose interior loop reproduces a `paired` cell, or a negative window for none."""
+    var end = start + window - 1
+    var stored = paired[unsafe_offset=cell_index(start, window, sequence_length)]
     for inner_start in range(start + 1, end):
         if inner_start - start - 1 > MAX_LOOP:
             break
         for inner_end in range(interior_end_floor(start, end, inner_start), end):
-            var inner_span = inner_end - inner_start + 1
-            if inner_span < MIN_HAIRPIN + 2:
+            var inner_window = inner_end - inner_start + 1
+            if inner_window < MIN_HAIRPIN + 2:
                 continue
-            var nested = paired[unsafe_offset=cell_index(inner_start, inner_span, length)]
+            var nested = paired[unsafe_offset=cell_index(inner_start, inner_window, sequence_length)]
             if nested >= FORBIDDEN:
                 continue
-            if interior_energy(sequence, tables, start, end, inner_start, inner_end) + nested == stored:
-                return FoldStep(FoldTable.PAIRED, Int32(inner_start), Int32(inner_span))
-    return FoldStep(FoldTable.PAIRED, 0, -1)
+            if interior_energy(sequence, energy_model, start, end, inner_start, inner_end) + nested == stored:
+                return PendingWindow(TableName.PAIRED, Int32(inner_start), Int32(inner_window))
+    return PendingWindow(TableName.PAIRED, 0, -1)
 
 
 def fold_traceback(
-    sequence: ImmSpan[Scalar[SYMBOL_DTYPE], _],
-    tables: ImmSpan[Scalar[ENERGY_DTYPE], _],
+    sequence: ImmSpan[Scalar[SymbolDType], _],
+    energy_model: ImmSpan[Scalar[EnergyDType], _],
     folded: FoldTables,
-) raises -> String:
-    """Walks the tables into a dot-bracket structure.
+) raises AffineGapsError -> String:
+    """Walks the energy_model into a dot-bracket structure.
 
-    Nothing is recorded during the fill: the tables are resident anyway, so testing the cases in
-    the order the fill tried them costs less than a parallel array of decisions.
+    Nothing is recorded during the fill: the energy_model are resident anyway, so testing the cases in
+    the order the fill tried them costs less than a parallel array of decisions. Partners are
+    walked from the furthest back, so a tie resolves to the longest helix.
     """
-    var length = len(sequence)
+    var sequence_length = len(sequence)
     var sequence_pointer = sequence.unsafe_ptr()
-    var tables_pointer = tables.unsafe_ptr()
+    var energy_model_pointer = energy_model.unsafe_ptr()
     var paired = folded.paired.unsafe_ptr()
     var multiloop = folded.multiloop.unsafe_ptr()
+    var closable = folded.closable.unsafe_ptr()
     var external = folded.external.unsafe_ptr()
 
-    var structure = List[Byte](length=length, fill=UNPAIRED_BYTE)
-    var work = List[FoldStep]()
-    work.append(FoldStep(FoldTable.EXTERNAL, 0, Int32(length)))
+    var structure = List[Byte](length=sequence_length, fill=UNPAIRED_BYTE)
+    var work = List[PendingWindow]()
+    work.append(PendingWindow(TableName.EXTERNAL, 0, Int32(sequence_length)))
 
     while len(work) > 0:
         var item = work.pop()
         var start = Int(item.start)
-        var span = Int(item.span)
-        if span <= 0:
+        var window = Int(item.window)
+        if window <= 0:
             continue
-        var end = start + span - 1
-        var here = cell_index(start, span, length)
-        var pair = pair_of(tables_pointer, Int(sequence[start]), Int(sequence[end]))
+        var end = start + window - 1
+        var here = cell_index(start, window, sequence_length)
 
-        if item.table == FoldTable.EXTERNAL:
+        if item.table == TableName.EXTERNAL:
             var stored = external[unsafe_offset=here]
-            if span > 1 and external[unsafe_offset=cell_index(start + 1, span - 1, length)] == stored:
-                work.append(FoldStep(FoldTable.EXTERNAL, Int32(start + 1), Int32(span - 1)))
+            if external[unsafe_offset=cell_index(start + 1, window - 1, sequence_length)] == stored:
+                work.append(PendingWindow(TableName.EXTERNAL, Int32(start + 1), Int32(window - 1)))
                 continue
-            if span > 1 and external[unsafe_offset=cell_index(start, span - 1, length)] == stored:
-                work.append(FoldStep(FoldTable.EXTERNAL, Int32(start), Int32(span - 1)))
-                continue
-            var closed = paired[unsafe_offset=here]
-            var placed = (
-                closed + terminal_penalty(pair) + dangle_energy(sequence_pointer, tables_pointer, start, end, length)
-            )
-            if closed < FORBIDDEN and placed == stored:
-                work.append(FoldStep(FoldTable.PAIRED, Int32(start), Int32(span)))
-                continue
-            for split in range(1, span):
-                if (
-                    external[unsafe_offset=cell_index(start, split, length)]
-                    + external[unsafe_offset=cell_index(start + split, span - split, length)]
-                    == stored
-                ):
-                    work.append(FoldStep(FoldTable.EXTERNAL, Int32(start), Int32(split)))
-                    work.append(FoldStep(FoldTable.EXTERNAL, Int32(start + split), Int32(span - split)))
+            var taken = False
+            for partner in range(end, start + MIN_HELIX_SPAN - 2, -1):
+                var branch = branch_energy(
+                    sequence_pointer, energy_model_pointer, paired, sequence_length, start, partner
+                )
+                if branch >= FORBIDDEN:
+                    continue
+                if branch + external[unsafe_offset=cell_index(partner + 1, end - partner, sequence_length)] == stored:
+                    work.append(PendingWindow(TableName.PAIRED, Int32(start), Int32(partner - start + 1)))
+                    work.append(PendingWindow(TableName.EXTERNAL, Int32(partner + 1), Int32(end - partner)))
+                    taken = True
                     break
+            if not taken:
+                raise AffineGapsError(ErrorKind.INCONSISTENT_TABLE, "Zuker exterior loop")
             continue
 
-        if item.table == FoldTable.MULTILOOP:
-            var stored = multiloop[unsafe_offset=here]
-            var closed = paired[unsafe_offset=here]
-            var placed = (
-                closed
-                + MULTILOOP_PER_HELIX
-                + terminal_penalty(pair)
-                + dangle_energy(sequence_pointer, tables_pointer, start, end, length)
-            )
-            if closed < FORBIDDEN and placed == stored:
-                work.append(FoldStep(FoldTable.PAIRED, Int32(start), Int32(span)))
-                continue
-            if span > 1 and (
-                multiloop[unsafe_offset=cell_index(start + 1, span - 1, length)] + MULTILOOP_PER_UNPAIRED == stored
-            ):
-                work.append(FoldStep(FoldTable.MULTILOOP, Int32(start + 1), Int32(span - 1)))
-                continue
-            if span > 1 and (
-                multiloop[unsafe_offset=cell_index(start, span - 1, length)] + MULTILOOP_PER_UNPAIRED == stored
-            ):
-                work.append(FoldStep(FoldTable.MULTILOOP, Int32(start), Int32(span - 1)))
-                continue
-            for split in range(1, span):
-                var left = multiloop[unsafe_offset=cell_index(start, split, length)]
-                var right = multiloop[unsafe_offset=cell_index(start + split, span - split, length)]
-                if left < FORBIDDEN and right < FORBIDDEN and left + right == stored:
-                    work.append(FoldStep(FoldTable.MULTILOOP, Int32(start), Int32(split)))
-                    work.append(FoldStep(FoldTable.MULTILOOP, Int32(start + split), Int32(span - split)))
+        if item.table == TableName.MULTILOOP or item.table == TableName.CLOSABLE:
+            var holding = multiloop if item.table == TableName.MULTILOOP else closable
+            var stored = holding[unsafe_offset=here]
+            if window > 1:
+                var trimmed = holding[unsafe_offset=cell_index(start + 1, window - 1, sequence_length)]
+                if trimmed < FORBIDDEN and trimmed + MULTILOOP_PER_UNPAIRED == stored:
+                    work.append(PendingWindow(item.table, Int32(start + 1), Int32(window - 1)))
+                    continue
+            var taken = False
+            for partner in range(end, start + MIN_HELIX_SPAN - 2, -1):
+                var branch = branch_energy(
+                    sequence_pointer, energy_model_pointer, paired, sequence_length, start, partner
+                )
+                if branch >= FORBIDDEN:
+                    continue
+                branch += MULTILOOP_PER_HELIX
+                var tail = end - partner
+                if item.table == TableName.MULTILOOP and branch + MULTILOOP_PER_UNPAIRED * Int32(tail) == stored:
+                    work.append(PendingWindow(TableName.PAIRED, Int32(start), Int32(partner - start + 1)))
+                    taken = True
                     break
+                var following = multiloop[unsafe_offset=cell_index(partner + 1, tail, sequence_length)]
+                if following < FORBIDDEN and branch + following == stored:
+                    work.append(PendingWindow(TableName.PAIRED, Int32(start), Int32(partner - start + 1)))
+                    work.append(PendingWindow(TableName.MULTILOOP, Int32(partner + 1), Int32(tail)))
+                    taken = True
+                    break
+            if not taken:
+                raise AffineGapsError(ErrorKind.INCONSISTENT_TABLE, "Zuker multiloop")
             continue
 
         var stored = paired[unsafe_offset=here]
+        var pair = pair_of(energy_model_pointer, Int(sequence[start]), Int(sequence[end]))
         structure[start] = OPEN_BYTE
         structure[end] = CLOSE_BYTE
-        if hairpin_energy(sequence_pointer, tables_pointer, start, end) == stored:
+        if hairpin_energy(sequence_pointer, energy_model_pointer, start, end) == stored:
             continue
-        var nested_step = winning_interior(sequence_pointer, tables_pointer, paired, length, start, span)
-        if nested_step.span > 0:
-            work.append(nested_step)
+        var winner = winning_interior(sequence_pointer, energy_model_pointer, paired, sequence_length, start, window)
+        if winner.window > 0:
+            work.append(PendingWindow(TableName.PAIRED, winner.start, winner.window))
             continue
+        var interior = closable[unsafe_offset=cell_index(start + 1, window - 2, sequence_length)]
         var closure = MULTILOOP_OFFSET + MULTILOOP_PER_HELIX + terminal_penalty(pair)
-        for split in range(start + 2, end - 1):
-            var left = multiloop[unsafe_offset=cell_index(start + 1, split - start - 1, length)]
-            var right = multiloop[unsafe_offset=cell_index(split, end - split, length)]
-            if left < FORBIDDEN and right < FORBIDDEN and left + right + closure == stored:
-                work.append(FoldStep(FoldTable.MULTILOOP, Int32(start + 1), Int32(split - start - 1)))
-                work.append(FoldStep(FoldTable.MULTILOOP, Int32(split), Int32(end - split)))
-                break
+        if interior >= FORBIDDEN or interior + closure != stored:
+            raise AffineGapsError(ErrorKind.INCONSISTENT_TABLE, "Zuker closing pair")
+        work.append(PendingWindow(TableName.CLOSABLE, Int32(start + 1), Int32(window - 2)))
 
     return String(unsafe_from_utf8=structure)
 
@@ -916,25 +1052,25 @@ def serial_fold(sequence_text: String) raises -> FoldResult:
     """Folds one RNA sequence on the host."""
     var alphabet = String(DEFAULT_RNA_ALPHABET)
     var sequence = translate(sequence_text, alphabet)
-    var tables = packed_turner_tables()
-    var folded = serial_fold_tables(Span(sequence), Span(tables))
+    var energy_model = packed_energy_model()
+    var folded = serial_fold_tables(Span(sequence), Span(energy_model))
     var energy = folded.external[cell_index(0, len(sequence), len(sequence))]
-    var structure = fold_traceback(Span(sequence), Span(tables), folded)
+    var structure = fold_traceback(Span(sequence), Span(energy_model), folded)
     return FoldResult(structure^, energy)
 
 
 def device_fold(ctx: DeviceContext, sequence_text: String) raises -> FoldResult:
     """Folds one RNA sequence with the sweep on the device and the walk on the host.
 
-    Traceback stays on the host because it is a serial walk over tables the device already filled,
+    Traceback stays on the host because it is a serial walk over energy_model the device already filled,
     and they are only quadratic, so bringing them back is cheap.
     """
     var alphabet = String(DEFAULT_RNA_ALPHABET)
     var sequence = translate(sequence_text, alphabet)
-    var tables = packed_turner_tables()
-    var folded = device_fold_tables(ctx, Span(sequence), Span(tables))
+    var energy_model = packed_energy_model()
+    var folded = device_fold_tables(ctx, Span(sequence), Span(energy_model))
     var energy = folded.external[cell_index(0, len(sequence), len(sequence))]
-    var structure = fold_traceback(Span(sequence), Span(tables), folded)
+    var structure = fold_traceback(Span(sequence), Span(energy_model), folded)
     return FoldResult(structure^, energy)
 
 
