@@ -47,10 +47,13 @@ default = ["color", "numba", "lint", "test"]
 PYTHONNOUSERSITE = "1"
 
 [tasks]
+# `mojo build -o` writes into a directory but will not create one, and `build/` is ignored, so a
+# fresh clone has nowhere to put the artifact. The caller makes it rather than git tracking it.
+prepare = "mkdir -p build"
 # Sibling modules resolve from the same directory, so each artifact names only its own root.
 # `$MOJO_ACCELERATOR` is empty locally, so the host's own GPU is detected; CI names one instead.
-build = "mojo build affinegaps.mojo --emit shared-lib -o build/affinegaps_mojo.so $MOJO_ACCELERATOR"
-build-cli = "mojo build cli.mojo -o build/affinegaps $MOJO_ACCELERATOR"
+build = {cmd = "mojo build affinegaps.mojo --emit shared-lib -o build/affinegaps_mojo.so $MOJO_ACCELERATOR", depends-on = ["prepare"]}
+build-cli = {cmd = "mojo build cli.mojo -o build/affinegaps $MOJO_ACCELERATOR", depends-on = ["prepare"]}
 format = "mojo format -l 120 *.mojo"
 hooks = "git config core.hooksPath .githooks"
 test = {cmd = "pytest test.py", depends-on = ["build"]}
