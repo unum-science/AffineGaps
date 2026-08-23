@@ -6,12 +6,20 @@ only credited when both sequences can form it. That makes the signal covariation
 thermodynamics, which is why no energy model appears here: the scoring is a substitution matrix
 for the alignment and a pair table for the structure.
 
-The table is indexed by `(start, length)` on each sequence rather than by four endpoints. The
-bifurcation then reads strictly smaller lengths in both dimensions, so every cell on the
-anti-diagonal `length_first + length_second` is independent, which is what the device sweep needs.
+The table is indexed by `(start, length)` on each sequence rather than by four endpoints. Each
+cell decides only what its two heads do, so the recurrence reads strictly smaller lengths in both
+dimensions and every cell on the anti-diagonal `length_first + length_second` is independent,
+which is what the device sweep needs.
 
-Cost is $O(n^6)$ in time and $O(n^2 m^2)$ in memory, and the memory is inherent: a bifurcation at
-one layer reads every layer beneath it, so no Hirschberg-style band exists. Traceback is therefore
+The heads are gapped, aligned and unpaired, or aligned and paired with a later column, and that
+last case is the whole scan: it names the partner of each head and covers both a helix closing the
+window and a helix followed by more structure. Restricting the scan to partners the pair table
+actually allows is what keeps it affordable, since only six of the sixteen letter pairs can close.
+Partners are tried from the furthest back, so a tie resolves to the longest helix and a stem comes
+out nested rather than chopped into neighbours.
+
+Cost is $O(n^6)$ in time and $O(n^2 m^2)$ in memory, and the memory is inherent: a helix at one
+layer reads every layer beneath it, so no Hirschberg-style band exists. Traceback is therefore
 free, since the whole table is resident regardless.
 
 The gap model is linear rather than affine. Affine gaps need the open state of both ends of both
@@ -43,35 +51,105 @@ UNREACHABLE = np.int32(np.iinfo(np.int32).min // 4)
 
 # The recurrence's cases, in the order the kernel tries them. The traceback walks the same order
 # and takes the first that reproduces the stored score, so ties resolve identically in both.
-CASE_HEAD_ALIGNED = 0
-CASE_TAIL_ALIGNED = 1
-CASE_HEAD_GAP_IN_SECOND = 2
-CASE_HEAD_GAP_IN_FIRST = 3
-CASE_TAIL_GAP_IN_SECOND = 4
-CASE_TAIL_GAP_IN_FIRST = 5
-CASE_PAIRED = 6
-CASE_BIFURCATION = 7
+CASE_ALIGNED = 0
+CASE_GAP_IN_SECOND = 1
+CASE_GAP_IN_FIRST = 2
+CASE_HELIX = 3
+
+
+def partner_index(encoded: np.ndarray, pair_matrix: np.ndarray, alphabet_size: int) -> tuple[np.ndarray, np.ndarray]:
+    """Where each letter's possible partners sit in a sequence, as one ascending run per letter.
+
+    `bounds[letter, threshold]` indexes that letter's run at its first entry from `threshold`
+    onwards, so a window turns into a contiguous slice instead of a scan with a test inside it.
+    """
+    length = encoded.shape[0]
+    runs = [np.flatnonzero(pair_matrix[letter, encoded] > 0) for letter in range(alphabet_size)]
+    positions = np.concatenate(runs).astype(np.int64) if length else np.zeros(0, dtype=np.int64)
+    bounds = np.zeros((alphabet_size, length + 1), dtype=np.int64)
+    offset = 0
+    for letter, run in enumerate(runs):
+        bounds[letter] = offset + np.searchsorted(run, np.arange(length + 1))
+        offset += run.shape[0]
+    return positions, bounds
 
 
 @jit_if_available(nopython=True)
-def _bifurcation_best(
+def _helix_candidate(
     table: np.ndarray,
+    encoded_first: np.ndarray,
+    encoded_second: np.ndarray,
+    substitution_matrix: np.ndarray,
+    pair_matrix: np.ndarray,
+    start_first: int,
+    length_first: int,
+    start_second: int,
+    length_second: int,
+    span_first: int,
+    span_second: int,
+) -> int:
+    """What one helix scores: its two closing columns, what they enclose, and what follows it."""
+    head_first = encoded_first[start_first]
+    head_second = encoded_second[start_second]
+    partner_first = encoded_first[start_first + span_first]
+    partner_second = encoded_second[start_second + span_second]
+    inside = table[start_first + 1, span_first - 1, start_second + 1, span_second - 1]
+    after = table[
+        start_first + span_first + 1,
+        length_first - span_first - 1,
+        start_second + span_second + 1,
+        length_second - span_second - 1,
+    ]
+    return (
+        inside
+        + after
+        + pair_matrix[head_first, partner_first]
+        + pair_matrix[head_second, partner_second]
+        + substitution_matrix[head_first, head_second]
+        + substitution_matrix[partner_first, partner_second]
+    )
+
+
+@jit_if_available(nopython=True)
+def _helix_best(
+    table: np.ndarray,
+    encoded_first: np.ndarray,
+    encoded_second: np.ndarray,
+    substitution_matrix: np.ndarray,
+    pair_matrix: np.ndarray,
+    positions_first: np.ndarray,
+    bounds_first: np.ndarray,
+    positions_second: np.ndarray,
+    bounds_second: np.ndarray,
     start_first: int,
     length_first: int,
     start_second: int,
     length_second: int,
 ) -> int:
-    """The best split of both windows into two adjacent halves, or nothing when neither can split."""
+    """The best helix the two heads can open, over every partner both windows can reach."""
     best = UNREACHABLE
-    for cut_first in range(1, length_first):
-        for cut_second in range(1, length_second):
-            candidate = table[start_first, cut_first, start_second, cut_second]
-            candidate += table[
-                start_first + cut_first,
-                length_first - cut_first,
-                start_second + cut_second,
-                length_second - cut_second,
-            ]
+    head_first = encoded_first[start_first]
+    head_second = encoded_second[start_second]
+    low_first = bounds_first[head_first, start_first + 1]
+    high_first = bounds_first[head_first, start_first + length_first]
+    low_second = bounds_second[head_second, start_second + 1]
+    high_second = bounds_second[head_second, start_second + length_second]
+    for index_first in range(high_first - 1, low_first - 1, -1):
+        span_first = positions_first[index_first] - start_first
+        for index_second in range(high_second - 1, low_second - 1, -1):
+            candidate = _helix_candidate(
+                table,
+                encoded_first,
+                encoded_second,
+                substitution_matrix,
+                pair_matrix,
+                start_first,
+                length_first,
+                start_second,
+                length_second,
+                span_first,
+                positions_second[index_second] - start_second,
+            )
             if candidate > best:
                 best = candidate
     return best
@@ -84,13 +162,17 @@ def _sankoff_cell(
     encoded_second: np.ndarray,
     substitution_matrix: np.ndarray,
     pair_matrix: np.ndarray,
+    positions_first: np.ndarray,
+    bounds_first: np.ndarray,
+    positions_second: np.ndarray,
+    bounds_second: np.ndarray,
     gap: int,
     start_first: int,
     length_first: int,
     start_second: int,
     length_second: int,
 ) -> int:
-    """Every case of one Sankoff cell, including the bifurcation scan.
+    """Every case of one Sankoff cell, including the helix scan.
 
     An empty window on either side can only be gapped through, which is what makes the base cases
     a pair of early returns rather than a branch wrapped around the whole body.
@@ -100,42 +182,32 @@ def _sankoff_cell(
     if length_second == 0:
         return length_first * gap
 
-    head_first = encoded_first[start_first]
-    head_second = encoded_second[start_second]
-    tail_first = encoded_first[start_first + length_first - 1]
-    tail_second = encoded_second[start_second + length_second - 1]
-    head_substitution = substitution_matrix[head_first, head_second]
-    tail_substitution = substitution_matrix[tail_first, tail_second]
-
+    head_substitution = substitution_matrix[encoded_first[start_first], encoded_second[start_second]]
     best = table[start_first + 1, length_first - 1, start_second + 1, length_second - 1] + head_substitution
-    candidate = table[start_first, length_first - 1, start_second, length_second - 1] + tail_substitution
-    if candidate > best:
-        best = candidate
     candidate = table[start_first + 1, length_first - 1, start_second, length_second] + gap
     if candidate > best:
         best = candidate
     candidate = table[start_first, length_first, start_second + 1, length_second - 1] + gap
     if candidate > best:
         best = candidate
-    candidate = table[start_first, length_first - 1, start_second, length_second] + gap
-    if candidate > best:
-        best = candidate
-    candidate = table[start_first, length_first, start_second, length_second - 1] + gap
-    if candidate > best:
-        best = candidate
 
-    # Both windows close a pair at once, which is where covariation is credited.
-    if length_first >= 2 and length_second >= 2:
-        closing_first = pair_matrix[head_first, tail_first]
-        closing_second = pair_matrix[head_second, tail_second]
-        if closing_first > 0 and closing_second > 0:
-            candidate = table[start_first + 1, length_first - 2, start_second + 1, length_second - 2]
-            candidate += closing_first + closing_second + head_substitution + tail_substitution
-            if candidate > best:
-                best = candidate
-        candidate = _bifurcation_best(table, start_first, length_first, start_second, length_second)
-        if candidate > best:
-            best = candidate
+    candidate = _helix_best(
+        table,
+        encoded_first,
+        encoded_second,
+        substitution_matrix,
+        pair_matrix,
+        positions_first,
+        bounds_first,
+        positions_second,
+        bounds_second,
+        start_first,
+        length_first,
+        start_second,
+        length_second,
+    )
+    if candidate > best:
+        best = candidate
     return best
 
 
@@ -145,6 +217,10 @@ def _sankoff_kernel(
     encoded_second: np.ndarray,
     substitution_matrix: np.ndarray,
     pair_matrix: np.ndarray,
+    positions_first: np.ndarray,
+    bounds_first: np.ndarray,
+    positions_second: np.ndarray,
+    bounds_second: np.ndarray,
     gap: int,
 ) -> np.ndarray:
     """Fills the whole Sankoff table, one anti-diagonal of lengths at a time.
@@ -168,6 +244,10 @@ def _sankoff_kernel(
                         encoded_second,
                         substitution_matrix,
                         pair_matrix,
+                        positions_first,
+                        bounds_first,
+                        positions_second,
+                        bounds_second,
                         gap,
                         start_first,
                         length_first,
@@ -189,62 +269,49 @@ def _winning_case(
     start_second: int,
     length_second: int,
 ) -> tuple[int, int, int]:
-    """Which case produced a cell's stored score, and the split point when it bifurcated.
+    """Which case produced a cell's stored score, and the two spans when it opened a helix.
 
     Re-derived rather than recorded, because the table is resident anyway and a parallel array of
-    decisions would cost as much again.
+    decisions would cost as much again. The walk is one path rather than the whole table, so it
+    tests each span for a possible pair instead of carrying the sweep's partner index.
     """
     stored = table[start_first, length_first, start_second, length_second]
     head_first, head_second = encoded_first[start_first], encoded_second[start_second]
-    tail_first = encoded_first[start_first + length_first - 1]
-    tail_second = encoded_second[start_second + length_second - 1]
 
     if (
         table[start_first + 1, length_first - 1, start_second + 1, length_second - 1]
         + substitution_matrix[head_first, head_second]
         == stored
     ):
-        return CASE_HEAD_ALIGNED, 0, 0
-    if (
-        table[start_first, length_first - 1, start_second, length_second - 1]
-        + substitution_matrix[tail_first, tail_second]
-        == stored
-    ):
-        return CASE_TAIL_ALIGNED, 0, 0
+        return CASE_ALIGNED, 0, 0
     if table[start_first + 1, length_first - 1, start_second, length_second] + gap == stored:
-        return CASE_HEAD_GAP_IN_SECOND, 0, 0
+        return CASE_GAP_IN_SECOND, 0, 0
     if table[start_first, length_first, start_second + 1, length_second - 1] + gap == stored:
-        return CASE_HEAD_GAP_IN_FIRST, 0, 0
-    if table[start_first, length_first - 1, start_second, length_second] + gap == stored:
-        return CASE_TAIL_GAP_IN_SECOND, 0, 0
-    if table[start_first, length_first, start_second, length_second - 1] + gap == stored:
-        return CASE_TAIL_GAP_IN_FIRST, 0, 0
+        return CASE_GAP_IN_FIRST, 0, 0
 
-    if length_first >= 2 and length_second >= 2:
-        closing_first = pair_matrix[head_first, tail_first]
-        closing_second = pair_matrix[head_second, tail_second]
-        if closing_first > 0 and closing_second > 0:
-            inner = table[start_first + 1, length_first - 2, start_second + 1, length_second - 2]
+    for span_first in range(length_first - 1, 0, -1):
+        if pair_matrix[head_first, encoded_first[start_first + span_first]] <= 0:
+            continue
+        for span_second in range(length_second - 1, 0, -1):
+            if pair_matrix[head_second, encoded_second[start_second + span_second]] <= 0:
+                continue
             if (
-                inner
-                + closing_first
-                + closing_second
-                + substitution_matrix[head_first, head_second]
-                + substitution_matrix[tail_first, tail_second]
+                _helix_candidate(
+                    table,
+                    encoded_first,
+                    encoded_second,
+                    substitution_matrix,
+                    pair_matrix,
+                    start_first,
+                    length_first,
+                    start_second,
+                    length_second,
+                    span_first,
+                    span_second,
+                )
                 == stored
             ):
-                return CASE_PAIRED, 0, 0
-        for cut_first in range(1, length_first):
-            for cut_second in range(1, length_second):
-                left = table[start_first, cut_first, start_second, cut_second]
-                right = table[
-                    start_first + cut_first,
-                    length_first - cut_first,
-                    start_second + cut_second,
-                    length_second - cut_second,
-                ]
-                if left + right == stored:
-                    return CASE_BIFURCATION, cut_first, cut_second
+                return CASE_HELIX, span_first, span_second
     raise AssertionError("No case reproduces the stored score; the table and the traceback disagree")
 
 
@@ -269,7 +336,7 @@ def _sankoff_traceback(
             span = range(start_first, start_first + length_first)
             return "".join(alphabet[encoded_first[i]] for i in span), "-" * length_first, "." * length_first
 
-        case, cut_first, cut_second = _winning_case(
+        case, span_first, span_second = _winning_case(
             table,
             encoded_first,
             encoded_second,
@@ -282,43 +349,33 @@ def _sankoff_traceback(
             length_second,
         )
         first_head, second_head = alphabet[encoded_first[start_first]], alphabet[encoded_second[start_second]]
-        first_tail = alphabet[encoded_first[start_first + length_first - 1]]
-        second_tail = alphabet[encoded_second[start_second + length_second - 1]]
 
-        if case == CASE_HEAD_ALIGNED:
+        if case == CASE_ALIGNED:
             left, right, shape = emit(start_first + 1, length_first - 1, start_second + 1, length_second - 1)
             return first_head + left, second_head + right, "." + shape
-        if case == CASE_TAIL_ALIGNED:
-            left, right, shape = emit(start_first, length_first - 1, start_second, length_second - 1)
-            return left + first_tail, right + second_tail, shape + "."
-        if case == CASE_HEAD_GAP_IN_SECOND:
+        if case == CASE_GAP_IN_SECOND:
             left, right, shape = emit(start_first + 1, length_first - 1, start_second, length_second)
             return first_head + left, "-" + right, "." + shape
-        if case == CASE_HEAD_GAP_IN_FIRST:
+        if case == CASE_GAP_IN_FIRST:
             left, right, shape = emit(start_first, length_first, start_second + 1, length_second - 1)
             return "-" + left, second_head + right, "." + shape
-        if case == CASE_TAIL_GAP_IN_SECOND:
-            left, right, shape = emit(start_first, length_first - 1, start_second, length_second)
-            return left + first_tail, right + "-", shape + "."
-        if case == CASE_TAIL_GAP_IN_FIRST:
-            left, right, shape = emit(start_first, length_first, start_second, length_second - 1)
-            return left + "-", right + second_tail, shape + "."
-        if case == CASE_PAIRED:
-            left, right, shape = emit(start_first + 1, length_first - 2, start_second + 1, length_second - 2)
-            return (
-                first_head + left + first_tail,
-                second_head + right + second_tail,
-                "(" + shape + ")",
-            )
 
-        left_first, left_second, left_shape = emit(start_first, cut_first, start_second, cut_second)
-        right_first, right_second, right_shape = emit(
-            start_first + cut_first,
-            length_first - cut_first,
-            start_second + cut_second,
-            length_second - cut_second,
+        inside_first, inside_second, inside_shape = emit(
+            start_first + 1, span_first - 1, start_second + 1, span_second - 1
         )
-        return left_first + right_first, left_second + right_second, left_shape + right_shape
+        after_first, after_second, after_shape = emit(
+            start_first + span_first + 1,
+            length_first - span_first - 1,
+            start_second + span_second + 1,
+            length_second - span_second - 1,
+        )
+        first_partner = alphabet[encoded_first[start_first + span_first]]
+        second_partner = alphabet[encoded_second[start_second + span_second]]
+        return (
+            first_head + inside_first + first_partner + after_first,
+            second_head + inside_second + second_partner + after_second,
+            "(" + inside_shape + ")" + after_shape,
+        )
 
     return emit(0, encoded_first.shape[0], 0, encoded_second.shape[0])
 
@@ -349,14 +406,32 @@ def sankoff_cofold(
     substitution_matrix = np.full((size, size), mismatch, dtype=np.int32)
     np.fill_diagonal(substitution_matrix, match)
     pairs = default_rna_pair_matrix if pair_matrix is None else pair_matrix
+    positions_first, bounds_first = partner_index(encoded_first, pairs, size)
+    positions_second, bounds_second = partner_index(encoded_second, pairs, size)
 
-    table = _sankoff_kernel(encoded_first, encoded_second, substitution_matrix, pairs, gap)
+    table = _sankoff_kernel(
+        encoded_first,
+        encoded_second,
+        substitution_matrix,
+        pairs,
+        positions_first,
+        bounds_first,
+        positions_second,
+        bounds_second,
+        gap,
+    )
     score = int(table[0, len(first), 0, len(second)])
     if not first or not second:
         gapped_first = first + "-" * len(second)
         gapped_second = "-" * len(first) + second
         return gapped_first, gapped_second, "." * (len(first) + len(second)), score
     aligned_first, aligned_second, structure = _sankoff_traceback(
-        table, encoded_first, encoded_second, substitution_matrix, pairs, gap, alphabet
+        table,
+        encoded_first,
+        encoded_second,
+        substitution_matrix,
+        pairs,
+        gap,
+        alphabet,
     )
     return aligned_first, aligned_second, structure, score

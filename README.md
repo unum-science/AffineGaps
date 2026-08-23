@@ -50,7 +50,7 @@ During my exploration of existing implementations, I've noticed several bugs:
 ## Benchmarks
 
 Throughput first, against the same kernels compiled for one CPU core, with third-party tools where one implements the same recurrence.
-Every cell is __wall time · cell-update rate__, and a cell update is one evaluation of the innermost recurrence rather than one entry of the table — `n * m` for alignment, an interior-loop triangle plus two bifurcation scans per span for folding, one bifurcation per window pair for cofolding.
+Every cell is __wall time · cell-update rate__, and a cell update is one evaluation of the innermost recurrence rather than one entry of the table — `n * m` for alignment, an interior-loop triangle plus two bifurcation scans per span for folding, one helix candidate per window pair for cofolding.
 Counting the work rather than the storage is what lets the same unit describe all three: a rate over table entries would fall with length by construction for the two folding recurrences, which spend $O(n)$ and $O(n^2)$ work per entry.
 
 A dash is a run that did not finish inside five minutes or whose table exceeded a 24 GiB budget.
@@ -103,17 +103,16 @@ Best of three below 4096 and a single run above, every answer checked against th
   <img alt="Cofolding wall clock against sequence length" src="assets/cofolding-light.svg">
 </picture>
 
-| Variant             |               24 nt |                32 nt |                48 nt |                64 nt |                96 nt |                128 nt |              192 nt |               256 nt |
-| :------------------ | ------------------: | -------------------: | -------------------: | -------------------: | -------------------: | --------------------: | ------------------: | -------------------: |
-| AffineGaps, H100    | 1.1 ms · 5.03 GCUPS |  2.4 ms · 12.4 GCUPS | 19.8 ms · 17.1 GCUPS | 67.1 ms · 28.5 GCUPS |  414 ms · 52.6 GCUPS | 2.02 s · 60.3 GCUPS ¹ | 30.8 s · 45.2 GCUPS | 3.7 min · 35.6 GCUPS |
-| AffineGaps, 1xSPR   | 4.4 ms · 1.19 GCUPS | 23.7 ms · 1.26 GCUPS |   407 ms · 835 MCUPS |   3.17 s · 602 MCUPS |   41.5 s · 524 MCUPS |                     — |                   — |                    — |
-| RNAstructure, 1xSPR |   170 ms · 31 MCUPS |    490 ms · 61 MCUPS |    4.30 s · 79 MCUPS |    22.9 s · 83 MCUPS | 4.5 min · 81 MCUPS ² |                     — |                   — |                    — |
+| Variant             |               24 nt |                32 nt |                48 nt |                64 nt |               96 nt |               128 nt |              192 nt |              256 nt |
+| :------------------ | ------------------: | -------------------: | -------------------: | -------------------: | ------------------: | -------------------: | ------------------: | ------------------: |
+| AffineGaps, H100    | 1.01 ms · 617 MCUPS | 2.43 ms · 1.69 GCUPS | 9.61 ms · 4.26 GCUPS | 29.8 ms · 9.40 GCUPS | 157 ms · 18.0 GCUPS |  539 ms · 25.5 GCUPS | 6.77 s · 27.9 GCUPS | 31.1 s · 31.9 GCUPS |
+| AffineGaps, 1xSPR   | 2.27 ms · 274 MCUPS |  11.2 ms · 368 MCUPS |   128 ms · 320 MCUPS |   1.18 s · 237 MCUPS |  12.0 s · 235 MCUPS | 68.6 s · 201 MCUPS ¹ |                   — |                   — |
+| RNAstructure, 1xSPR |   170 ms · 31 MCUPS |    490 ms · 61 MCUPS |    4.30 s · 79 MCUPS |    22.9 s · 83 MCUPS |  4.5 min · 81 MCUPS |                    — |                   — |                   — |
 
 > Measured 23 August 2026, random RNA, covariance scoring.
 > Columns are sequence lengths in nucleotide "nt" bases.
 > `dynalign` ran with `imaxseparation = n`, which switches its banding off, and scores Turner energies instead — so compare the clock, not the rate.
-> ¹ Rate peaks here; past L2 the bifurcation scan scatters against HBM.
-> ² Where one core stops being practical.
+> ¹ Where one core stops being practical.
 
 ### Alignment Speed Against WFA2
 
@@ -360,7 +359,7 @@ print(score)           # 46, the optimum of the recurrence rather than a free en
 The structure is dot-bracket over the __alignment columns__, so one string describes the pairing both sequences agree on.
 
 The table is indexed by a window of each sequence, so it holds $O(n^2 m^2)$ cells, and __that memory is inherent rather than an implementation limit__.
-A bifurcation at one layer reads every layer beneath it, so nothing can ever be retired.
+A helix at one layer reads every layer beneath it, so nothing can ever be retired.
 Measured at $n = 24$, even a perfect freeing oracle leaves 75.5% of the table live at peak, which is why no Hirschberg-style band exists here and why the linear-memory claim is scoped to alignment.
 The consolation is that __traceback costs nothing extra__: the whole table is resident regardless, so reconstruction is a walk rather than a second pass.
 

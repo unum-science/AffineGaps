@@ -5,13 +5,20 @@ Sankoff's 1985 recurrence aligns two sequences and folds them together, creditin
 when both sequences can form it. The signal is covariation rather than thermodynamics, so the
 scoring is a substitution matrix and a pair table, with no energy model anywhere.
 
-The table is indexed by `(start, length)` on each sequence rather than by four endpoints. A
-bifurcation then reads strictly smaller lengths in both dimensions, which makes every cell on the
-anti-diagonal `length_first + length_second` independent and turns $O(n^6)$ work into `n + m + 1`
-dependent layers with full parallelism inside each.
+The table is indexed by `(start, length)` on each sequence rather than by four endpoints. Each
+cell decides only what its two heads do, so the recurrence reads strictly smaller lengths in both
+dimensions, every cell on the anti-diagonal `length_first + length_second` is independent, and
+$O(n^6)$ work becomes `n + m + 1` dependent layers with full parallelism inside each.
 
-Memory is $O(n^2 m^2)$ and that is inherent, not an implementation limit: a bifurcation at one
-layer reads every layer beneath it, so nothing can be retired and no Hirschberg-style band exists.
+The heads are gapped, aligned and unpaired, or aligned and paired with a later column, and that
+last case is the whole scan: it names the partner of each head and covers both a helix closing the
+window and a helix followed by more structure. Restricting the scan to partners the pair table
+actually allows is what keeps it affordable, since only six of the sixteen letter pairs can close.
+Partners are tried from the furthest back, so a tie resolves to the longest helix and a stem comes
+out nested rather than chopped into neighbours.
+
+Memory is $O(n^2 m^2)$ and that is inherent, not an implementation limit: a helix at one layer
+reads every layer beneath it, so nothing can be retired and no Hirschberg-style band exists.
 Measured at n = 24, a perfect freeing oracle still leaves 75.5% of the table live at peak. The
 consolation is that traceback costs nothing extra, since the whole table is resident regardless.
 
@@ -53,6 +60,7 @@ comptime DEFAULT_RNA_ALPHABET_SIZE = 4
 comptime DEFAULT_MATCH = Int32(2)
 comptime DEFAULT_MISMATCH = Int32(-1)
 comptime DEFAULT_GAP = Int32(-2)
+comptime POSITION_DTYPE = DType.int32
 
 
 @fieldwise_init
@@ -65,22 +73,14 @@ struct SankoffScoring(ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct Neighbours(ImplicitlyCopyable, TrivialRegisterPassable):
-    """The seven cells one Sankoff cell reads outside its bifurcation."""
+    """The three cells one Sankoff cell reads outside its helix scan."""
 
-    var head_aligned: Int32
+    var aligned: Int32
     """Both windows give up their first symbol and the two are aligned."""
-    var tail_aligned: Int32
-    """Both windows give up their last symbol and the two are aligned."""
-    var head_gap_in_second: Int32
+    var gap_in_second: Int32
     """The first window's head aligns to a gap."""
-    var head_gap_in_first: Int32
+    var gap_in_first: Int32
     """The second window's head aligns to a gap."""
-    var tail_gap_in_second: Int32
-    """The first window's tail aligns to a gap."""
-    var tail_gap_in_first: Int32
-    """The second window's tail aligns to a gap."""
-    var paired_inner: Int32
-    """What remains once both windows close a base pair across their two ends."""
 
 
 @always_inline
@@ -93,61 +93,33 @@ def read_neighbours(
     rows: Int,
     columns: Int,
 ) -> Neighbours:
-    """The seven cells one Sankoff cell reads, in the order the recurrence tries them.
+    """The three cells one Sankoff cell reads, in the order the recurrence tries them.
 
     One reader serves the host sweep, the device sweep and the traceback, so a case can never be
     tested against a cell the fill did not use.
     """
-    var paired_inner = Int32(0)
-    if length_first >= 2 and length_second >= 2:
-        paired_inner = table[
-            unsafe_offset=cell_index(
-                start_first + 1, length_first - 2, start_second + 1, length_second - 2, rows, columns
-            )
-        ]
     return Neighbours(
         table[
             unsafe_offset=cell_index(
                 start_first + 1, length_first - 1, start_second + 1, length_second - 1, rows, columns
             )
         ],
-        table[unsafe_offset=cell_index(start_first, length_first - 1, start_second, length_second - 1, rows, columns)],
         table[unsafe_offset=cell_index(start_first + 1, length_first - 1, start_second, length_second, rows, columns)],
         table[unsafe_offset=cell_index(start_first, length_first, start_second + 1, length_second - 1, rows, columns)],
-        table[unsafe_offset=cell_index(start_first, length_first - 1, start_second, length_second, rows, columns)],
-        table[unsafe_offset=cell_index(start_first, length_first, start_second, length_second - 1, rows, columns)],
-        paired_inner,
     )
 
 
 @always_inline
-def sankoff_cell(
-    neighbours: Neighbours,
-    head_substitution: Int32,
-    tail_substitution: Int32,
-    closing_first: Int32,
-    closing_second: Int32,
-    length_first: Int,
-    length_second: Int,
-    scoring: SankoffScoring,
-) -> Int32:
-    """The constant-work cases of one Sankoff cell, without the bifurcation.
+def sankoff_cell(neighbours: Neighbours, head_substitution: Int32, scoring: SankoffScoring) -> Int32:
+    """The constant-work cases of one Sankoff cell, without the helix scan.
 
     Pure arithmetic over values the caller already read, so the host sweep and the device sweep
-    share this transcription unchanged. The bifurcation stays with the caller because its shape is
+    share this transcription unchanged. The helix scan stays with the caller because its shape is
     a serial loop on one and a block reduction on the other.
     """
-    var best = neighbours.head_aligned + head_substitution
-    best = max(best, neighbours.tail_aligned + tail_substitution)
-    best = max(best, neighbours.head_gap_in_second + scoring.gap)
-    best = max(best, neighbours.head_gap_in_first + scoring.gap)
-    best = max(best, neighbours.tail_gap_in_second + scoring.gap)
-    best = max(best, neighbours.tail_gap_in_first + scoring.gap)
-    if length_first >= 2 and length_second >= 2 and closing_first > 0 and closing_second > 0:
-        best = max(
-            best,
-            neighbours.paired_inner + closing_first + closing_second + head_substitution + tail_substitution,
-        )
+    var best = neighbours.aligned + head_substitution
+    best = max(best, neighbours.gap_in_second + scoring.gap)
+    best = max(best, neighbours.gap_in_first + scoring.gap)
     return best
 
 
@@ -167,63 +139,138 @@ def table_cells(rows: Int, columns: Int) -> Int:
 
 # endregion Scoring
 
-# region Serial Reference
+# region Partners
+
+
+@fieldwise_init
+struct PartnerIndex(Copyable, Movable):
+    """Where each letter's possible partners sit in one sequence, as one ascending run per letter."""
+
+    var positions: List[Scalar[POSITION_DTYPE]]
+    """Every position that can close a pair, the letters' runs laid end to end."""
+    var bounds: List[Scalar[POSITION_DTYPE]]
+    """Letter `c`'s run at its first entry from `t` onwards, held at `c * (length + 1) + t`."""
+
+
+@fieldwise_init
+struct PartnerRange(ImplicitlyCopyable, TrivialRegisterPassable):
+    """Half-open slice of one letter's run, covering the partners one window can reach."""
+
+    var low: Int
+    """First entry of the run that lands inside the window."""
+    var high: Int
+    """One past the run's last entry inside the window."""
+
+
+def partner_index(
+    sequence: ImmSpan[Scalar[SYMBOL_DTYPE], _],
+    pairs: ImmSpan[Scalar[SUBSTITUTION_DTYPE], _],
+    alphabet_size: Int,
+) -> PartnerIndex:
+    """Lists, per letter, every position in the sequence that letter can close a pair with.
+
+    The runs are ascending, so a window's candidates are a contiguous slice and the scan carries
+    no test inside it. Six of the sixteen RNA letter pairs can close, which is what makes the
+    slice worth building rather than filtering the window on the fly.
+    """
+    var length = len(sequence)
+    var positions = List[Scalar[POSITION_DTYPE]]()
+    var bounds = List[Scalar[POSITION_DTYPE]](length=alphabet_size * (length + 1), fill=Scalar[POSITION_DTYPE](0))
+    for letter in range(alphabet_size):
+        for position in range(length):
+            bounds[letter * (length + 1) + position] = Scalar[POSITION_DTYPE](len(positions))
+            if pairs[letter * alphabet_size + Int(sequence[position])] > 0:
+                positions.append(Scalar[POSITION_DTYPE](position))
+        bounds[letter * (length + 1) + length] = Scalar[POSITION_DTYPE](len(positions))
+    return PartnerIndex(positions^, bounds^)
 
 
 @always_inline
-def cofold_cell(
+def partner_range(
+    bounds: Pointer[Scalar[POSITION_DTYPE], _],
+    head: Int,
+    sequence_length: Int,
+    start: Int,
+    window: Int,
+) -> PartnerRange:
+    """Which of `head`'s partners a window can reach, as a slice of that letter's run.
+
+    A head cannot pair with itself, so the slice runs from the position after it to the window's
+    last, and a window of one position yields an empty slice rather than a case.
+    """
+    var run = head * (sequence_length + 1)
+    return PartnerRange(
+        Int(bounds[unsafe_offset=run + start + 1]),
+        Int(bounds[unsafe_offset=run + start + window]),
+    )
+
+
+@always_inline
+def helix_candidate(
     table: Pointer[Scalar[SCORE_DTYPE], _],
-    first: ImmSpan[Scalar[SYMBOL_DTYPE], _],
-    second: ImmSpan[Scalar[SYMBOL_DTYPE], _],
-    substitutions: ImmSpan[Scalar[SUBSTITUTION_DTYPE], _],
-    pairs: ImmSpan[Scalar[SUBSTITUTION_DTYPE], _],
+    first: Pointer[Scalar[SYMBOL_DTYPE], _],
+    second: Pointer[Scalar[SYMBOL_DTYPE], _],
+    substitutions: Pointer[Scalar[SUBSTITUTION_DTYPE], _],
+    pairs: Pointer[Scalar[SUBSTITUTION_DTYPE], _],
     alphabet_size: Int,
-    scoring: SankoffScoring,
     start_first: Int,
     length_first: Int,
     start_second: Int,
     length_second: Int,
+    span_first: Int,
+    span_second: Int,
+    rows: Int,
+    columns: Int,
 ) -> Int32:
-    """Every case of one Sankoff cell, including the bifurcation scan.
+    """What one helix scores: its two closing columns, what they enclose, and what follows it.
 
-    An empty window on either side can only be gapped through, which is what makes the base cases
-    a pair of early returns rather than a branch wrapped around the whole body.
+    One transcription serves the host sweep, the device sweep and the traceback, so a helix can
+    never be tested against a score the fill did not use.
     """
-    var rows = len(first)
-    var columns = len(second)
-    if length_first == 0:
-        return Int32(length_second) * scoring.gap
-    if length_second == 0:
-        return Int32(length_first) * scoring.gap
-
-    var head_first = Int(first[start_first])
-    var head_second = Int(second[start_second])
-    var tail_first = Int(first[start_first + length_first - 1])
-    var tail_second = Int(second[start_second + length_second - 1])
-
-    var closing_first = Int32(0)
-    var closing_second = Int32(0)
-    if length_first >= 2 and length_second >= 2:
-        closing_first = Int32(pairs[head_first * alphabet_size + tail_first])
-        closing_second = Int32(pairs[head_second * alphabet_size + tail_second])
-
-    var neighbours = read_neighbours(table, start_first, length_first, start_second, length_second, rows, columns)
-    var best = sankoff_cell(
-        neighbours,
-        Int32(substitutions[head_first * alphabet_size + head_second]),
-        Int32(substitutions[tail_first * alphabet_size + tail_second]),
-        closing_first,
-        closing_second,
-        length_first,
-        length_second,
-        scoring,
+    var head_first = Int(first[unsafe_offset=start_first])
+    var head_second = Int(second[unsafe_offset=start_second])
+    var partner_first = Int(first[unsafe_offset=start_first + span_first])
+    var partner_second = Int(second[unsafe_offset=start_second + span_second])
+    var inside = table[
+        unsafe_offset=cell_index(start_first + 1, span_first - 1, start_second + 1, span_second - 1, rows, columns)
+    ]
+    var after = table[
+        unsafe_offset=cell_index(
+            start_first + span_first + 1,
+            length_first - span_first - 1,
+            start_second + span_second + 1,
+            length_second - span_second - 1,
+            rows,
+            columns,
+        )
+    ]
+    return (
+        inside
+        + after
+        + Int32(pairs[unsafe_offset=head_first * alphabet_size + partner_first])
+        + Int32(pairs[unsafe_offset=head_second * alphabet_size + partner_second])
+        + Int32(substitutions[unsafe_offset=head_first * alphabet_size + head_second])
+        + Int32(substitutions[unsafe_offset=partner_first * alphabet_size + partner_second])
     )
-    return max(best, bifurcation_best(table, start_first, length_first, start_second, length_second, rows, columns))
+
+
+# endregion Partners
+
+# region Serial Reference
 
 
 @always_inline
-def bifurcation_best(
+def helix_best(
     table: Pointer[Scalar[SCORE_DTYPE], _],
+    first: Pointer[Scalar[SYMBOL_DTYPE], _],
+    second: Pointer[Scalar[SYMBOL_DTYPE], _],
+    substitutions: Pointer[Scalar[SUBSTITUTION_DTYPE], _],
+    pairs: Pointer[Scalar[SUBSTITUTION_DTYPE], _],
+    positions_first: Pointer[Scalar[POSITION_DTYPE], _],
+    bounds_first: Pointer[Scalar[POSITION_DTYPE], _],
+    positions_second: Pointer[Scalar[POSITION_DTYPE], _],
+    bounds_second: Pointer[Scalar[POSITION_DTYPE], _],
+    alphabet_size: Int,
     start_first: Int,
     length_first: Int,
     start_second: Int,
@@ -231,23 +278,94 @@ def bifurcation_best(
     rows: Int,
     columns: Int,
 ) -> Int32:
-    """The best split of both windows into two adjacent halves, or nothing when neither can split."""
+    """The best helix the two heads can open, over every partner both windows can reach."""
     var best = NEGATIVE_INFINITY
-    for cut_first in range(1, length_first):
-        for cut_second in range(1, length_second):
-            var left = table[unsafe_offset=cell_index(start_first, cut_first, start_second, cut_second, rows, columns)]
-            var right = table[
-                unsafe_offset=cell_index(
-                    start_first + cut_first,
-                    length_first - cut_first,
-                    start_second + cut_second,
-                    length_second - cut_second,
+    var head_first = Int(first[unsafe_offset=start_first])
+    var head_second = Int(second[unsafe_offset=start_second])
+    var reachable_first = partner_range(bounds_first, head_first, rows, start_first, length_first)
+    var reachable_second = partner_range(bounds_second, head_second, columns, start_second, length_second)
+    for index_first in range(reachable_first.high - 1, reachable_first.low - 1, -1):
+        var partner_first = Int(positions_first[unsafe_offset=index_first])
+        for index_second in range(reachable_second.high - 1, reachable_second.low - 1, -1):
+            best = max(
+                best,
+                helix_candidate(
+                    table,
+                    first,
+                    second,
+                    substitutions,
+                    pairs,
+                    alphabet_size,
+                    start_first,
+                    length_first,
+                    start_second,
+                    length_second,
+                    partner_first - start_first,
+                    Int(positions_second[unsafe_offset=index_second]) - start_second,
                     rows,
                     columns,
-                )
-            ]
-            best = max(best, left + right)
+                ),
+            )
     return best
+
+
+@always_inline
+def cofold_cell(
+    table: Pointer[Scalar[SCORE_DTYPE], _],
+    first: Pointer[Scalar[SYMBOL_DTYPE], _],
+    second: Pointer[Scalar[SYMBOL_DTYPE], _],
+    substitutions: Pointer[Scalar[SUBSTITUTION_DTYPE], _],
+    pairs: Pointer[Scalar[SUBSTITUTION_DTYPE], _],
+    positions_first: Pointer[Scalar[POSITION_DTYPE], _],
+    bounds_first: Pointer[Scalar[POSITION_DTYPE], _],
+    positions_second: Pointer[Scalar[POSITION_DTYPE], _],
+    bounds_second: Pointer[Scalar[POSITION_DTYPE], _],
+    alphabet_size: Int,
+    scoring: SankoffScoring,
+    start_first: Int,
+    length_first: Int,
+    start_second: Int,
+    length_second: Int,
+    rows: Int,
+    columns: Int,
+) -> Int32:
+    """Every case of one Sankoff cell, including the helix scan.
+
+    An empty window on either side can only be gapped through, which is what makes the base cases
+    a pair of early returns rather than a branch wrapped around the whole body.
+    """
+    if length_first == 0:
+        return Int32(length_second) * scoring.gap
+    if length_second == 0:
+        return Int32(length_first) * scoring.gap
+
+    var head_first = Int(first[unsafe_offset=start_first])
+    var head_second = Int(second[unsafe_offset=start_second])
+    var neighbours = read_neighbours(table, start_first, length_first, start_second, length_second, rows, columns)
+    var best = sankoff_cell(
+        neighbours, Int32(substitutions[unsafe_offset=head_first * alphabet_size + head_second]), scoring
+    )
+    return max(
+        best,
+        helix_best(
+            table,
+            first,
+            second,
+            substitutions,
+            pairs,
+            positions_first,
+            bounds_first,
+            positions_second,
+            bounds_second,
+            alphabet_size,
+            start_first,
+            length_first,
+            start_second,
+            length_second,
+            rows,
+            columns,
+        ),
+    )
 
 
 def serial_cofold_table(
@@ -265,8 +383,18 @@ def serial_cofold_table(
     """
     var rows = len(first)
     var columns = len(second)
+    var partners_first = partner_index(first, pairs, alphabet_size)
+    var partners_second = partner_index(second, pairs, alphabet_size)
     var table = List[Scalar[SCORE_DTYPE]](length=table_cells(rows, columns), fill=Scalar[SCORE_DTYPE](0))
     var cells = table.unsafe_ptr()
+    var first_cursor = first.unsafe_ptr()
+    var second_cursor = second.unsafe_ptr()
+    var substitutions_cursor = substitutions.unsafe_ptr()
+    var pairs_cursor = pairs.unsafe_ptr()
+    var positions_first = partners_first.positions.unsafe_ptr()
+    var bounds_first = partners_first.bounds.unsafe_ptr()
+    var positions_second = partners_second.positions.unsafe_ptr()
+    var bounds_second = partners_second.bounds.unsafe_ptr()
 
     for length_first in range(rows + 1):
         for length_second in range(columns + 1):
@@ -277,16 +405,22 @@ def serial_cofold_table(
                     var here = cell_index(start_first, length_first, start_second, length_second, rows, columns)
                     cells[unsafe_offset=here] = cofold_cell(
                         cells,
-                        first,
-                        second,
-                        substitutions,
-                        pairs,
+                        first_cursor,
+                        second_cursor,
+                        substitutions_cursor,
+                        pairs_cursor,
+                        positions_first,
+                        bounds_first,
+                        positions_second,
+                        bounds_second,
                         alphabet_size,
                         scoring,
                         start_first,
                         length_first,
                         start_second,
                         length_second,
+                        rows,
+                        columns,
                     )
     return table^
 
@@ -324,6 +458,10 @@ def cofold_layer_kernel(
     second: Pointer[Scalar[SYMBOL_DTYPE], MutAnyOrigin],
     substitutions: Pointer[Scalar[SUBSTITUTION_DTYPE], MutAnyOrigin],
     pairs: Pointer[Scalar[SUBSTITUTION_DTYPE], MutAnyOrigin],
+    positions_first: Pointer[Scalar[POSITION_DTYPE], MutAnyOrigin],
+    bounds_first: Pointer[Scalar[POSITION_DTYPE], MutAnyOrigin],
+    positions_second: Pointer[Scalar[POSITION_DTYPE], MutAnyOrigin],
+    bounds_second: Pointer[Scalar[POSITION_DTYPE], MutAnyOrigin],
     table: Pointer[Scalar[SCORE_DTYPE], MutAnyOrigin],
     rows_in: Int32,
     columns_in: Int32,
@@ -365,52 +503,43 @@ def cofold_layer_kernel(
             table[unsafe_offset=here] = Int32(length_first) * gap
         return
 
+    var head_first = Int(first[unsafe_offset=start_first])
+    var head_second = Int(second[unsafe_offset=start_second])
     var best = NEGATIVE_INFINITY
     """
-    Thread zero owns the constant cases, so only it pays for their seven reads. Every other thread goes straight to
-    its slice of the bifurcation.
+    Thread zero owns the three head cases, so only it pays for their reads. Every other thread goes straight to its
+    slice of the helix scan.
     """
     if thread_idx.x == 0:
-        var head_first = Int(first[unsafe_offset=start_first])
-        var head_second = Int(second[unsafe_offset=start_second])
-        var tail_first = Int(first[unsafe_offset=start_first + length_first - 1])
-        var tail_second = Int(second[unsafe_offset=start_second + length_second - 1])
-
-        var closing_first = Int32(0)
-        var closing_second = Int32(0)
-        if length_first >= 2 and length_second >= 2:
-            closing_first = Int32(pairs[unsafe_offset=head_first * width + tail_first])
-            closing_second = Int32(pairs[unsafe_offset=head_second * width + tail_second])
         var neighbours = read_neighbours(table, start_first, length_first, start_second, length_second, rows, columns)
-        best = sankoff_cell(
-            neighbours,
-            Int32(substitutions[unsafe_offset=head_first * width + head_second]),
-            Int32(substitutions[unsafe_offset=tail_first * width + tail_second]),
-            closing_first,
-            closing_second,
-            length_first,
-            length_second,
-            scoring,
-        )
+        best = sankoff_cell(neighbours, Int32(substitutions[unsafe_offset=head_first * width + head_second]), scoring)
 
-    if length_first >= 2 and length_second >= 2:
-        var splits_second = length_second - 1
-        var split_count = (length_first - 1) * splits_second
-        for flat in range(Int(thread_idx.x), split_count, THREADS_PER_BLOCK):
-            var cut_first = flat // splits_second + 1
-            var cut_second = flat % splits_second + 1
-            var left = table[unsafe_offset=cell_index(start_first, cut_first, start_second, cut_second, rows, columns)]
-            var right = table[
-                unsafe_offset=cell_index(
-                    start_first + cut_first,
-                    length_first - cut_first,
-                    start_second + cut_second,
-                    length_second - cut_second,
-                    rows,
-                    columns,
-                )
-            ]
-            best = max(best, left + right)
+    var reachable_first = partner_range(bounds_first, head_first, rows, start_first, length_first)
+    var reachable_second = partner_range(bounds_second, head_second, columns, start_second, length_second)
+    var reachable_second_count = reachable_second.high - reachable_second.low
+    var candidates = (reachable_first.high - reachable_first.low) * reachable_second_count
+    for flat in range(Int(thread_idx.x), candidates, THREADS_PER_BLOCK):
+        var partner_first = Int(positions_first[unsafe_offset=reachable_first.low + flat // reachable_second_count])
+        var partner_second = Int(positions_second[unsafe_offset=reachable_second.low + flat % reachable_second_count])
+        best = max(
+            best,
+            helix_candidate(
+                table,
+                first,
+                second,
+                substitutions,
+                pairs,
+                width,
+                start_first,
+                length_first,
+                start_second,
+                length_second,
+                partner_first - start_first,
+                partner_second - start_second,
+                rows,
+                columns,
+            ),
+        )
 
     var answer = block_max(reduction, best)
     if thread_idx.x == 0:
@@ -430,11 +559,17 @@ def device_cofold_table(
     var rows = len(first)
     var columns = len(second)
     var cells = table_cells(rows, columns)
+    var partners_first = partner_index(first, pairs, alphabet_size)
+    var partners_second = partner_index(second, pairs, alphabet_size)
 
     var first_buffer = upload[SYMBOL_DTYPE](ctx, first)
     var second_buffer = upload[SYMBOL_DTYPE](ctx, second)
     var substitutions_buffer = upload[SUBSTITUTION_DTYPE](ctx, substitutions)
     var pairs_buffer = upload[SUBSTITUTION_DTYPE](ctx, pairs)
+    var positions_first_buffer = upload[POSITION_DTYPE](ctx, Span(partners_first.positions))
+    var bounds_first_buffer = upload[POSITION_DTYPE](ctx, Span(partners_first.bounds))
+    var positions_second_buffer = upload[POSITION_DTYPE](ctx, Span(partners_second.positions))
+    var bounds_second_buffer = upload[POSITION_DTYPE](ctx, Span(partners_second.bounds))
     var table_buffer = zeroed[SCORE_DTYPE](ctx, cells)
 
     for diagonal in range(0, rows + columns + 1):
@@ -447,6 +582,10 @@ def device_cofold_table(
             second_buffer.unsafe_ptr(),
             substitutions_buffer.unsafe_ptr(),
             pairs_buffer.unsafe_ptr(),
+            positions_first_buffer.unsafe_ptr(),
+            bounds_first_buffer.unsafe_ptr(),
+            positions_second_buffer.unsafe_ptr(),
+            bounds_second_buffer.unsafe_ptr(),
             table_buffer.unsafe_ptr(),
             Int32(rows),
             Int32(columns),
@@ -480,34 +619,26 @@ struct SankoffCase(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
     var identifier: UInt8
     """Which decomposition this names."""
-    comptime HEAD_ALIGNED = Self(0)
-    """Both heads consumed and aligned to each other."""
-    comptime TAIL_ALIGNED = Self(1)
-    """Both tails consumed and aligned to each other."""
-    comptime HEAD_GAP_IN_SECOND = Self(2)
+    comptime ALIGNED = Self(0)
+    """Both heads consumed and aligned to each other, leaving that column unpaired."""
+    comptime GAP_IN_SECOND = Self(1)
     """The first head consumed against a gap."""
-    comptime HEAD_GAP_IN_FIRST = Self(3)
+    comptime GAP_IN_FIRST = Self(2)
     """The second head consumed against a gap."""
-    comptime TAIL_GAP_IN_SECOND = Self(4)
-    """The first tail consumed against a gap."""
-    comptime TAIL_GAP_IN_FIRST = Self(5)
-    """The second tail consumed against a gap."""
-    comptime PAIRED = Self(6)
-    """Both windows close a base pair, which is where covariation is credited."""
-    comptime BIFURCATION = Self(7)
-    """Both windows split into two adjacent halves."""
+    comptime HELIX = Self(3)
+    """Both heads consumed, aligned and paired with a later column, which is where covariation is credited."""
 
 
 @fieldwise_init
 struct Decision(ImplicitlyCopyable, TrivialRegisterPassable):
-    """A winning case, with the split point when it bifurcated."""
+    """A winning case, with the two spans when it opened a helix."""
 
     var outcome: SankoffCase
     """Which case reproduced the cell's stored score."""
-    var cut_first: Int32
-    """Where the first window split, or zero when the case did not bifurcate."""
-    var cut_second: Int32
-    """Where the second window split, or zero when the case did not bifurcate."""
+    var span_first: Int32
+    """How far the first head reaches to its partner, or zero when no helix opened."""
+    var span_second: Int32
+    """How far the second head reaches to its partner, or zero when no helix opened."""
 
 
 def winning_case(
@@ -526,55 +657,50 @@ def winning_case(
     """Which case reproduces a cell's stored score, tried in the order the sweep tried them.
 
     Re-derived rather than recorded: the table is resident anyway, so a parallel array of
-    decisions would cost as much again for nothing.
+    decisions would cost as much again for nothing. The walk is one path rather than the whole
+    table, so it tests each span for a possible pair instead of carrying the sweep's index.
     """
     var rows = len(first)
     var columns = len(second)
     var stored = table[cell_index(start_first, length_first, start_second, length_second, rows, columns)]
     var head_first = Int(first[start_first])
     var head_second = Int(second[start_second])
-    var tail_first = Int(first[start_first + length_first - 1])
-    var tail_second = Int(second[start_second + length_second - 1])
     var head_substitution = Int32(substitutions[head_first * alphabet_size + head_second])
-    var tail_substitution = Int32(substitutions[tail_first * alphabet_size + tail_second])
 
     var near = read_neighbours(
         table.unsafe_ptr(), start_first, length_first, start_second, length_second, rows, columns
     )
-    if near.head_aligned + head_substitution == stored:
-        return Decision(SankoffCase.HEAD_ALIGNED, 0, 0)
-    if near.tail_aligned + tail_substitution == stored:
-        return Decision(SankoffCase.TAIL_ALIGNED, 0, 0)
-    if near.head_gap_in_second + scoring.gap == stored:
-        return Decision(SankoffCase.HEAD_GAP_IN_SECOND, 0, 0)
-    if near.head_gap_in_first + scoring.gap == stored:
-        return Decision(SankoffCase.HEAD_GAP_IN_FIRST, 0, 0)
-    if near.tail_gap_in_second + scoring.gap == stored:
-        return Decision(SankoffCase.TAIL_GAP_IN_SECOND, 0, 0)
-    if near.tail_gap_in_first + scoring.gap == stored:
-        return Decision(SankoffCase.TAIL_GAP_IN_FIRST, 0, 0)
+    if near.aligned + head_substitution == stored:
+        return Decision(SankoffCase.ALIGNED, 0, 0)
+    if near.gap_in_second + scoring.gap == stored:
+        return Decision(SankoffCase.GAP_IN_SECOND, 0, 0)
+    if near.gap_in_first + scoring.gap == stored:
+        return Decision(SankoffCase.GAP_IN_FIRST, 0, 0)
 
-    if length_first >= 2 and length_second >= 2:
-        var closing_first = Int32(pairs[head_first * alphabet_size + tail_first])
-        var closing_second = Int32(pairs[head_second * alphabet_size + tail_second])
-        if closing_first > 0 and closing_second > 0:
-            if near.paired_inner + closing_first + closing_second + head_substitution + tail_substitution == stored:
-                return Decision(SankoffCase.PAIRED, 0, 0)
-        for cut_first in range(1, length_first):
-            for cut_second in range(1, length_second):
-                var left = table[cell_index(start_first, cut_first, start_second, cut_second, rows, columns)]
-                var right = table[
-                    cell_index(
-                        start_first + cut_first,
-                        length_first - cut_first,
-                        start_second + cut_second,
-                        length_second - cut_second,
-                        rows,
-                        columns,
-                    )
-                ]
-                if left + right == stored:
-                    return Decision(SankoffCase.BIFURCATION, Int32(cut_first), Int32(cut_second))
+    for span_first in range(length_first - 1, 0, -1):
+        if pairs[head_first * alphabet_size + Int(first[start_first + span_first])] <= 0:
+            continue
+        for span_second in range(length_second - 1, 0, -1):
+            if pairs[head_second * alphabet_size + Int(second[start_second + span_second])] <= 0:
+                continue
+            var candidate = helix_candidate(
+                table.unsafe_ptr(),
+                first.unsafe_ptr(),
+                second.unsafe_ptr(),
+                substitutions.unsafe_ptr(),
+                pairs.unsafe_ptr(),
+                alphabet_size,
+                start_first,
+                length_first,
+                start_second,
+                length_second,
+                span_first,
+                span_second,
+                rows,
+                columns,
+            )
+            if candidate == stored:
+                return Decision(SankoffCase.HELIX, Int32(span_first), Int32(span_second))
     raise AffineGapsError(ErrorKind.INCONSISTENT_TABLE, "Sankoff traceback")
 
 
@@ -597,8 +723,9 @@ def expand_window(
 ) raises:
     """Appends the columns one window contributes, left to right.
 
-    Head cases append before recursing and tail cases after, which is what keeps a bifurcation's
-    two halves in order without a separate ordering pass.
+    Every case consumes the two heads first, so the columns arrive in order without a separate
+    ordering pass, and a helix emits its opening column, what it encloses, its closing column and
+    then whatever follows it.
     """
     if length_first == 0 and length_second == 0:
         return
@@ -630,10 +757,8 @@ def expand_window(
     )
     var head_first = letters[Int(first[start_first])]
     var head_second = letters[Int(second[start_second])]
-    var tail_first = letters[Int(first[start_first + length_first - 1])]
-    var tail_second = letters[Int(second[start_second + length_second - 1])]
 
-    if decision.outcome == SankoffCase.HEAD_ALIGNED:
+    if decision.outcome == SankoffCase.ALIGNED:
         gapped_first.append(head_first)
         gapped_second.append(head_second)
         structure.append(UNPAIRED_BYTE)
@@ -654,7 +779,7 @@ def expand_window(
             gapped_second,
             structure,
         )
-    elif decision.outcome == SankoffCase.HEAD_GAP_IN_SECOND:
+    elif decision.outcome == SankoffCase.GAP_IN_SECOND:
         gapped_first.append(head_first)
         gapped_second.append(GAP_BYTE)
         structure.append(UNPAIRED_BYTE)
@@ -675,7 +800,7 @@ def expand_window(
             gapped_second,
             structure,
         )
-    elif decision.outcome == SankoffCase.HEAD_GAP_IN_FIRST:
+    elif decision.outcome == SankoffCase.GAP_IN_FIRST:
         gapped_first.append(GAP_BYTE)
         gapped_second.append(head_second)
         structure.append(UNPAIRED_BYTE)
@@ -696,7 +821,9 @@ def expand_window(
             gapped_second,
             structure,
         )
-    elif decision.outcome == SankoffCase.PAIRED:
+    else:
+        var span_first = Int(decision.span_first)
+        var span_second = Int(decision.span_second)
         gapped_first.append(head_first)
         gapped_second.append(head_second)
         structure.append(OPEN_BYTE)
@@ -710,19 +837,16 @@ def expand_window(
             alphabet_size,
             scoring,
             start_first + 1,
-            length_first - 2,
+            span_first - 1,
             start_second + 1,
-            length_second - 2,
+            span_second - 1,
             gapped_first,
             gapped_second,
             structure,
         )
-        gapped_first.append(tail_first)
-        gapped_second.append(tail_second)
+        gapped_first.append(letters[Int(first[start_first + span_first])])
+        gapped_second.append(letters[Int(second[start_second + span_second])])
         structure.append(CLOSE_BYTE)
-    elif decision.outcome == SankoffCase.BIFURCATION:
-        var cut_first = Int(decision.cut_first)
-        var cut_second = Int(decision.cut_second)
         expand_window(
             table,
             first,
@@ -732,94 +856,14 @@ def expand_window(
             letters,
             alphabet_size,
             scoring,
-            start_first,
-            cut_first,
-            start_second,
-            cut_second,
+            start_first + span_first + 1,
+            length_first - span_first - 1,
+            start_second + span_second + 1,
+            length_second - span_second - 1,
             gapped_first,
             gapped_second,
             structure,
         )
-        expand_window(
-            table,
-            first,
-            second,
-            substitutions,
-            pairs,
-            letters,
-            alphabet_size,
-            scoring,
-            start_first + cut_first,
-            length_first - cut_first,
-            start_second + cut_second,
-            length_second - cut_second,
-            gapped_first,
-            gapped_second,
-            structure,
-        )
-    elif decision.outcome == SankoffCase.TAIL_ALIGNED:
-        expand_window(
-            table,
-            first,
-            second,
-            substitutions,
-            pairs,
-            letters,
-            alphabet_size,
-            scoring,
-            start_first,
-            length_first - 1,
-            start_second,
-            length_second - 1,
-            gapped_first,
-            gapped_second,
-            structure,
-        )
-        gapped_first.append(tail_first)
-        gapped_second.append(tail_second)
-        structure.append(UNPAIRED_BYTE)
-    elif decision.outcome == SankoffCase.TAIL_GAP_IN_SECOND:
-        expand_window(
-            table,
-            first,
-            second,
-            substitutions,
-            pairs,
-            letters,
-            alphabet_size,
-            scoring,
-            start_first,
-            length_first - 1,
-            start_second,
-            length_second,
-            gapped_first,
-            gapped_second,
-            structure,
-        )
-        gapped_first.append(tail_first)
-        gapped_second.append(GAP_BYTE)
-        structure.append(UNPAIRED_BYTE)
-    else:
-        expand_window(
-            table,
-            first,
-            second,
-            substitutions,
-            pairs,
-            letters,
-            alphabet_size,
-            scoring,
-            start_first,
-            length_first,
-            start_second,
-            length_second - 1,
-            gapped_first,
-            gapped_second,
-            structure,
-        )
-        gapped_first.append(GAP_BYTE)
-        gapped_second.append(tail_second)
-        structure.append(UNPAIRED_BYTE)
 
 
 # endregion Traceback
