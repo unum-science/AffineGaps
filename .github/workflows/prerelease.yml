@@ -78,7 +78,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                # Apple silicon has Metal rather than CUDA, and every Metal target Mojo offers needs macOS 26.
+                # Apple reaches Metal, not CUDA, and every Apple GPU shares one budget, so M1 stands in for all.
                 include:
                     - {
                           os: ubuntu-24.04,
@@ -100,7 +100,11 @@ jobs:
                           target: sm_100a,
                           accelerator: --target-accelerator sm_100a,
                       }
-                    - { os: macos-26, target: metal, accelerator: "" }
+                    - {
+                          os: macos-26,
+                          target: metal,
+                          accelerator: --target-accelerator apple-m1-metal4,
+                      }
         env:
             MOJO_ACCELERATOR: ${{ matrix.accelerator }}
         steps:
