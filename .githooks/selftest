@@ -62,6 +62,9 @@ expects superscript-jammed    reject table.md '| tool | 2.36s · 467G¹ |'
 expects superscript-spaced    accept table.md '| tool | 2.36s · 467G ¹ |'
 expects raw-ceildiv           reject thing.py 'blocks = (total + width - 1) // width'
 expects helper-ceildiv        accept thing.py 'blocks = ceildiv(total, width)'
+expects prose-identifier      reject thing.py '# Three energy_model are filled in step.'
+expects prose-backticked      accept thing.py '# Three `energy_model` buffers are filled in step.'
+expects prose-fenced          accept thing.py $'"""Usage.\n\n```bash\npixi run build  # build/affinegaps_mojo.so\n```\n"""'
 
 echo "commit-msg:"
 # subject <name> <reject|accept> <subject>

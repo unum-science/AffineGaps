@@ -11,14 +11,14 @@ dimensions, every cell on the anti-diagonal `window_first + window_second` is in
 $O(n^6)$ work becomes `n + m + 1` dependent layers with full parallelism inside each.
 
 The heads are gapped, aligned and unpaired, or aligned and paired with a later column, and that
-last chosen is the whole scan: it names the partner of each head and covers both a helix closing the
-window and a helix followed by more structure. Restricting the scan to partners the pair table
+last case is the whole scan: it names the partner of each head and covers both a pair closing the
+window and a pair followed by more structure. Restricting the scan to partners the pair table
 actually allows is what keeps it affordable, since only six of the sixteen letter pairs can close.
 The traceback tries partners from the furthest back, so a tie resolves to the longest helix and a
 stem comes out nested rather than chopped into neighbours. The fill's own order does not matter,
 because it keeps only a maximum.
 
-Memory is $O(n^2 m^2)$ and that is inherent, not an implementation limit: a helix at one layer
+Memory is $O(n^2 m^2)$ and that is inherent, not an implementation limit: a pairing at one layer
 reads every layer beneath it, so nothing can be retired and no Hirschberg-style band exists.
 Measured at n = 24, a perfect freeing oracle still leaves 75.5% of the table live at peak. The
 consolation is that traceback costs nothing extra, since the whole table is resident regardless.
@@ -59,6 +59,10 @@ comptime DEFAULT_RNA_ALPHABET_SIZE = 4
 comptime DEFAULT_MATCH = Int32(2)
 comptime DEFAULT_MISMATCH = Int32(-1)
 comptime DEFAULT_GAP = Int32(-2)
+comptime MIN_TURN = 3
+"""Fewest bases any pair must enclose, the same floor `folding.mojo` applies."""
+comptime MIN_CLOSING_REACH = MIN_TURN + 1
+"""The turn plus the partner past it: the shortest head-to-partner distance."""
 comptime CellDType = DType.int16
 """Storage for one table cell. Narrower than the arithmetic, because the table is what binds."""
 comptime PositionDType = DType.int32
@@ -75,7 +79,7 @@ struct SankoffScoring(ImplicitlyCopyable, TrivialRegisterPassable):
 
 @fieldwise_init
 struct Neighbours(ImplicitlyCopyable, TrivialRegisterPassable):
-    """The three cells one Sankoff cell reads outside its helix scan."""
+    """The three cells one Sankoff cell reads outside its pairing scan."""
 
     var aligned: Int32
     """Both windows give up their first symbol and the two are aligned."""
@@ -88,45 +92,57 @@ struct Neighbours(ImplicitlyCopyable, TrivialRegisterPassable):
 @always_inline
 def read_neighbours(
     table: Pointer[Scalar[CellDType], _],
-    start_first: Int,
-    window_first: Int,
-    start_second: Int,
-    window_second: Int,
-    rows: Int,
-    columns: Int,
+    windows: WindowPair,
+    shape: TableShape,
 ) -> Neighbours:
     """The three cells one Sankoff cell reads, in the order the recurrence tries them.
 
-    One reader serves the host sweep, the device sweep and the traceback, so a chosen can never be
+    One reader serves the host sweep, the device sweep and the traceback, so a case can never be
     tested against a cell the fill did not use.
     """
     return Neighbours(
         Int32(
             table[
                 unsafe_offset=cell_index(
-                    start_first + 1, window_first - 1, start_second + 1, window_second - 1, rows, columns
+                    WindowPair(
+                        windows.start_first + 1,
+                        windows.window_first - 1,
+                        windows.start_second + 1,
+                        windows.window_second - 1,
+                    ),
+                    shape,
                 )
             ]
         ),
         Int32(
             table[
-                unsafe_offset=cell_index(start_first + 1, window_first - 1, start_second, window_second, rows, columns)
+                unsafe_offset=cell_index(
+                    WindowPair(
+                        windows.start_first + 1, windows.window_first - 1, windows.start_second, windows.window_second
+                    ),
+                    shape,
+                )
             ]
         ),
         Int32(
             table[
-                unsafe_offset=cell_index(start_first, window_first, start_second + 1, window_second - 1, rows, columns)
+                unsafe_offset=cell_index(
+                    WindowPair(
+                        windows.start_first, windows.window_first, windows.start_second + 1, windows.window_second - 1
+                    ),
+                    shape,
+                )
             ]
         ),
     )
 
 
 @always_inline
-def sankoff_cell(neighbours: Neighbours, head_substitution: Int32, scoring: SankoffScoring) -> Int32:
-    """The constant-work cases of one Sankoff cell, without the helix scan.
+def neighbours_best(neighbours: Neighbours, head_substitution: Int32, scoring: SankoffScoring) -> Int32:
+    """The constant-work cases of one Sankoff cell, without the pairing scan.
 
     Pure arithmetic over values the caller already read, so the host sweep and the device sweep
-    share this transcription unchanged. The helix scan stays with the caller because its shape is
+    share this transcription unchanged. The pairing scan stays with the caller because its shape is
     a serial loop on one and a block reduction on the other.
     """
     var best = neighbours.aligned + head_substitution
@@ -136,12 +152,12 @@ def sankoff_cell(neighbours: Neighbours, head_substitution: Int32, scoring: Sank
 
 
 @always_inline
-def cell_index(
-    start_first: Int, window_first: Int, start_second: Int, window_second: Int, rows: Int, columns: Int
-) -> Int:
+def cell_index(windows: WindowPair, shape: TableShape) -> Int:
     """Row-major over `(start_first, window_first, start_second, window_second)`."""
-    var stride = columns + 1
-    return ((start_first * (rows + 1) + window_first) * stride + start_second) * stride + window_second
+    var stride = shape.columns + 1
+    return (
+        (windows.start_first * (shape.rows + 1) + windows.window_first) * stride + windows.start_second
+    ) * stride + windows.window_second
 
 
 @always_inline
@@ -172,6 +188,30 @@ struct PartnerRange(ImplicitlyCopyable, TrivialRegisterPassable):
     """First entry of the run that lands inside the window."""
     var high: Int
     """One past the run's last entry inside the window."""
+
+
+@fieldwise_init
+struct WindowPair(ImplicitlyCopyable, TrivialRegisterPassable):
+    """One window into each sequence, which together address one cell."""
+
+    var start_first: Int
+    """First position of the window into the first sequence."""
+    var window_first: Int
+    """How many positions that window covers."""
+    var start_second: Int
+    """First position of the window into the second sequence."""
+    var window_second: Int
+    """How many positions that window covers."""
+
+
+@fieldwise_init
+struct TableShape(ImplicitlyCopyable, TrivialRegisterPassable):
+    """The two sequence lengths, which are what stride the four-dimensional table."""
+
+    var rows: Int
+    """Length of the first sequence."""
+    var columns: Int
+    """Length of the second sequence."""
 
 
 def partner_index(
@@ -207,67 +247,101 @@ def partner_range(
 ) -> PartnerRange:
     """Which of `head`'s partners a window can reach, as a slice of that letter's run.
 
-    A head cannot pair with itself, so the slice runs from the position after it to the window's
-    last, and a window of one position yields an empty slice rather than a chosen.
+    A pair has to enclose enough bases to turn the backbone around, so the slice starts past that
+    floor, clamped to the window's own end. A window too short to hold a hairpin yields an empty
+    slice rather than a partner nobody can pair with.
     """
     var run = head * (sequence_length + 1)
+    var floor = min(MIN_CLOSING_REACH, window)
     return PartnerRange(
-        Int(bounds[unsafe_offset=run + start + 1]),
+        Int(bounds[unsafe_offset=run + start + floor]),
         Int(bounds[unsafe_offset=run + start + window]),
     )
 
 
+@fieldwise_init
+struct PairedHeads(ImplicitlyCopyable, TrivialRegisterPassable):
+    """What a cell's two heads contribute to every candidate they can open.
+
+    None of it depends on the partners, so a cell reads it once instead of once per candidate, and
+    the partner scan is the hottest loop in the recurrence.
+    """
+
+    var first: Int
+    """Encoded head of the first sequence."""
+    var second: Int
+    """Encoded head of the second sequence."""
+    var substitution: Int32
+    """What aligning the two heads scores, fixed for the cell."""
+
+
 @always_inline
-def helix_candidate(
+def paired_heads(
+    first: Pointer[Scalar[SymbolDType], _],
+    second: Pointer[Scalar[SymbolDType], _],
+    substitutions: Pointer[Scalar[SubstitutionDType], _],
+    alphabet_size: Int,
+    start_first: Int,
+    start_second: Int,
+) -> PairedHeads:
+    """Everything one cell's two heads contribute, hoisted out of the partner scan."""
+    var head_first = Int(first[unsafe_offset=start_first])
+    var head_second = Int(second[unsafe_offset=start_second])
+    return PairedHeads(
+        head_first,
+        head_second,
+        Int32(substitutions[unsafe_offset=head_first * alphabet_size + head_second]),
+    )
+
+
+@always_inline
+def paired_candidate(
     table: Pointer[Scalar[CellDType], _],
     first: Pointer[Scalar[SymbolDType], _],
     second: Pointer[Scalar[SymbolDType], _],
     substitutions: Pointer[Scalar[SubstitutionDType], _],
     pairs: Pointer[Scalar[SubstitutionDType], _],
+    heads: PairedHeads,
     alphabet_size: Int,
-    start_first: Int,
-    window_first: Int,
-    start_second: Int,
-    window_second: Int,
+    windows: WindowPair,
     reach_first: Int,
     reach_second: Int,
-    rows: Int,
-    columns: Int,
+    shape: TableShape,
 ) -> Int32:
-    """What one helix scores: its two closing columns, what they enclose, and what follows it.
+    """What one pairing scores: its two closing columns, what they enclose, and what follows it.
 
-    One transcription serves the host sweep, the device sweep and the traceback, so a helix can
+    One transcription serves the host sweep, the device sweep and the traceback, so a pairing can
     never be tested against a score the fill did not use.
     """
-    var head_first = Int(first[unsafe_offset=start_first])
-    var head_second = Int(second[unsafe_offset=start_second])
-    var partner_first = Int(first[unsafe_offset=start_first + reach_first])
-    var partner_second = Int(second[unsafe_offset=start_second + reach_second])
+    var partner_first = Int(first[unsafe_offset=windows.start_first + reach_first])
+    var partner_second = Int(second[unsafe_offset=windows.start_second + reach_second])
     var inside = Int32(
         table[
             unsafe_offset=cell_index(
-                start_first + 1, reach_first - 1, start_second + 1, reach_second - 1, rows, columns
+                WindowPair(windows.start_first + 1, reach_first - 1, windows.start_second + 1, reach_second - 1),
+                shape,
             )
         ]
     )
     var after = Int32(
         table[
             unsafe_offset=cell_index(
-                start_first + reach_first + 1,
-                window_first - reach_first - 1,
-                start_second + reach_second + 1,
-                window_second - reach_second - 1,
-                rows,
-                columns,
+                WindowPair(
+                    windows.start_first + reach_first + 1,
+                    windows.window_first - reach_first - 1,
+                    windows.start_second + reach_second + 1,
+                    windows.window_second - reach_second - 1,
+                ),
+                shape,
             )
         ]
     )
     return (
         inside
         + after
-        + Int32(pairs[unsafe_offset=head_first * alphabet_size + partner_first])
-        + Int32(pairs[unsafe_offset=head_second * alphabet_size + partner_second])
-        + Int32(substitutions[unsafe_offset=head_first * alphabet_size + head_second])
+        + Int32(pairs[unsafe_offset=heads.first * alphabet_size + partner_first])
+        + Int32(pairs[unsafe_offset=heads.second * alphabet_size + partner_second])
+        + heads.substitution
         + Int32(substitutions[unsafe_offset=partner_first * alphabet_size + partner_second])
     )
 
@@ -278,7 +352,7 @@ def helix_candidate(
 
 
 @always_inline
-def helix_best(
+def paired_best(
     table: Pointer[Scalar[CellDType], _],
     first: Pointer[Scalar[SymbolDType], _],
     second: Pointer[Scalar[SymbolDType], _],
@@ -289,39 +363,35 @@ def helix_best(
     positions_second: Pointer[Scalar[PositionDType], _],
     bounds_second: Pointer[Scalar[PositionDType], _],
     alphabet_size: Int,
-    start_first: Int,
-    window_first: Int,
-    start_second: Int,
-    window_second: Int,
-    rows: Int,
-    columns: Int,
+    windows: WindowPair,
+    shape: TableShape,
 ) -> Int32:
-    """The best helix the two heads can open, over every partner both windows can reach."""
+    """The best pairing the two heads can open, over every partner both windows can reach."""
     var best = NEGATIVE_INFINITY
-    var head_first = Int(first[unsafe_offset=start_first])
-    var head_second = Int(second[unsafe_offset=start_second])
-    var reachable_first = partner_range(bounds_first, head_first, rows, start_first, window_first)
-    var reachable_second = partner_range(bounds_second, head_second, columns, start_second, window_second)
+    var heads = paired_heads(first, second, substitutions, alphabet_size, windows.start_first, windows.start_second)
+    var head_first = heads.first
+    var head_second = heads.second
+    var reachable_first = partner_range(bounds_first, head_first, shape.rows, windows.start_first, windows.window_first)
+    var reachable_second = partner_range(
+        bounds_second, head_second, shape.columns, windows.start_second, windows.window_second
+    )
     for index_first in range(reachable_first.high - 1, reachable_first.low - 1, -1):
         var partner_first = Int(positions_first[unsafe_offset=index_first])
         for index_second in range(reachable_second.high - 1, reachable_second.low - 1, -1):
             best = max(
                 best,
-                helix_candidate(
+                paired_candidate(
                     table,
                     first,
                     second,
                     substitutions,
                     pairs,
+                    heads,
                     alphabet_size,
-                    start_first,
-                    window_first,
-                    start_second,
-                    window_second,
-                    partner_first - start_first,
-                    Int(positions_second[unsafe_offset=index_second]) - start_second,
-                    rows,
-                    columns,
+                    windows,
+                    partner_first - windows.start_first,
+                    Int(positions_second[unsafe_offset=index_second]) - windows.start_second,
+                    shape,
                 ),
             )
     return best
@@ -340,32 +410,28 @@ def cofold_cell(
     bounds_second: Pointer[Scalar[PositionDType], _],
     alphabet_size: Int,
     scoring: SankoffScoring,
-    start_first: Int,
-    window_first: Int,
-    start_second: Int,
-    window_second: Int,
-    rows: Int,
-    columns: Int,
+    windows: WindowPair,
+    shape: TableShape,
 ) -> Int32:
-    """Every chosen of one Sankoff cell, including the helix scan.
+    """Every case of one Sankoff cell, including the pairing scan.
 
     An empty window on either side can only be gapped through, which is what makes the base cases
     a pair of early returns rather than a branch wrapped around the whole body.
     """
-    if window_first == 0:
-        return Int32(window_second) * scoring.gap
-    if window_second == 0:
-        return Int32(window_first) * scoring.gap
+    if windows.window_first == 0:
+        return Int32(windows.window_second) * scoring.gap
+    if windows.window_second == 0:
+        return Int32(windows.window_first) * scoring.gap
 
-    var head_first = Int(first[unsafe_offset=start_first])
-    var head_second = Int(second[unsafe_offset=start_second])
-    var neighbours = read_neighbours(table, start_first, window_first, start_second, window_second, rows, columns)
-    var best = sankoff_cell(
+    var head_first = Int(first[unsafe_offset=windows.start_first])
+    var head_second = Int(second[unsafe_offset=windows.start_second])
+    var neighbours = read_neighbours(table, windows, shape)
+    var best = neighbours_best(
         neighbours, Int32(substitutions[unsafe_offset=head_first * alphabet_size + head_second]), scoring
     )
     return max(
         best,
-        helix_best(
+        paired_best(
             table,
             first,
             second,
@@ -376,20 +442,15 @@ def cofold_cell(
             positions_second,
             bounds_second,
             alphabet_size,
-            start_first,
-            window_first,
-            start_second,
-            window_second,
-            rows,
-            columns,
+            windows,
+            shape,
         ),
     )
 
 
 @always_inline
 def check_cell_range(
-    rows: Int,
-    columns: Int,
+    shape: TableShape,
     substitutions: ImmSpan[Scalar[SubstitutionDType], _],
     pairs: ImmSpan[Scalar[SubstitutionDType], _],
     scoring: SankoffScoring,
@@ -406,7 +467,7 @@ def check_cell_range(
     var widest_pair = 0
     for index in range(len(pairs)):
         widest_pair = max(widest_pair, Int(abs(Int32(pairs[index]))))
-    if (rows + columns) * (widest_column + widest_pair) > Int(Scalar[CellDType].MAX):
+    if (shape.rows + shape.columns) * (widest_column + widest_pair) > Int(Scalar[CellDType].MAX):
         raise AffineGapsError(ErrorKind.INVALID_SCORING, "Sankoff scoring overflows a table cell")
 
 
@@ -425,7 +486,8 @@ def serial_cofold_table(
     """
     var rows = len(first)
     var columns = len(second)
-    check_cell_range(rows, columns, substitutions, pairs, scoring)
+    var shape = TableShape(rows, columns)
+    check_cell_range(shape, substitutions, pairs, scoring)
     var partners_first = partner_index(first, pairs, alphabet_size)
     var partners_second = partner_index(second, pairs, alphabet_size)
     var table = List[Scalar[CellDType]](length=table_cells(rows, columns), fill=Scalar[CellDType](0))
@@ -445,7 +507,8 @@ def serial_cofold_table(
                 continue
             for start_first in range(rows - window_first + 1):
                 for start_second in range(columns - window_second + 1):
-                    var here = cell_index(start_first, window_first, start_second, window_second, rows, columns)
+                    var windows = WindowPair(start_first, window_first, start_second, window_second)
+                    var here = cell_index(windows, shape)
                     cells[unsafe_offset=here] = Scalar[CellDType](
                         cofold_cell(
                             cells,
@@ -459,12 +522,8 @@ def serial_cofold_table(
                             bounds_second,
                             alphabet_size,
                             scoring,
-                            start_first,
-                            window_first,
-                            start_second,
-                            window_second,
-                            rows,
-                            columns,
+                            windows,
+                            shape,
                         )
                     )
     return table^
@@ -532,13 +591,12 @@ def cofold_anti_diagonal_kernel(
 ):
     """One warp per cell of the anti-diagonal `window_first + window_second`.
 
-    Cells on a anti_diagonal read only strictly smaller lengths, so the whole layer is independent and
-    one kernel launch per anti_diagonal is all the synchronization the recurrence needs. A warp rather
+    Cells on an anti-diagonal read only strictly smaller lengths, so the whole layer is independent and
+    one kernel launch per anti-diagonal is all the synchronization the recurrence needs. A warp rather
     than a block owns a cell, so the scan reduces through registers and a cell too small to fill
     the warp wastes lanes rather than a whole block.
     """
-    var rows = Int(rows_in)
-    var columns = Int(columns_in)
+    var shape = TableShape(Int(rows_in), Int(columns_in))
     var width = Int(alphabet_size)
     var base = Int(anti_diagonal_base)
     var span = Int(window_count)
@@ -563,10 +621,9 @@ def cofold_anti_diagonal_kernel(
     var window_first = Int(smallest_window_first) + low
     var window_second = Int(anti_diagonal) - window_first
     var within = cell - Int(offsets[unsafe_offset=base + low])
-    var starts_second = columns - window_second + 1
-    var start_first = within // starts_second
-    var start_second = within % starts_second
-    var here = cell_index(start_first, window_first, start_second, window_second, rows, columns)
+    var starts_second = shape.columns - window_second + 1
+    var windows = WindowPair(within // starts_second, window_first, within % starts_second, window_second)
+    var here = cell_index(windows, shape)
     var scoring = SankoffScoring(gap)
 
     if window_first == 0 and window_second == 0:
@@ -580,19 +637,22 @@ def cofold_anti_diagonal_kernel(
             table[unsafe_offset=here] = Scalar[CellDType](Int32(window_first) * gap)
         return
 
-    var head_first = Int(first[unsafe_offset=start_first])
-    var head_second = Int(second[unsafe_offset=start_second])
+    var heads = paired_heads(first, second, substitutions, width, windows.start_first, windows.start_second)
+    var head_first = heads.first
+    var head_second = heads.second
     var best = NEGATIVE_INFINITY
     """
     Lane zero owns the three head cases, so only it pays for their reads. Every other lane goes straight to its slice
-    of the helix scan.
+    of the pairing scan.
     """
     if lane == 0:
-        var neighbours = read_neighbours(table, start_first, window_first, start_second, window_second, rows, columns)
-        best = sankoff_cell(neighbours, Int32(substitutions[unsafe_offset=head_first * width + head_second]), scoring)
+        var neighbours = read_neighbours(table, windows, shape)
+        best = neighbours_best(neighbours, heads.substitution, scoring)
 
-    var reachable_first = partner_range(bounds_first, head_first, rows, start_first, window_first)
-    var reachable_second = partner_range(bounds_second, head_second, columns, start_second, window_second)
+    var reachable_first = partner_range(bounds_first, head_first, shape.rows, windows.start_first, windows.window_first)
+    var reachable_second = partner_range(
+        bounds_second, head_second, shape.columns, windows.start_second, windows.window_second
+    )
     var reachable_second_count = reachable_second.high - reachable_second.low
     var candidates = (reachable_first.high - reachable_first.low) * reachable_second_count
     for candidate in range(lane, candidates, WARP_SIZE):
@@ -604,21 +664,18 @@ def cofold_anti_diagonal_kernel(
         )
         best = max(
             best,
-            helix_candidate(
+            paired_candidate(
                 table,
                 first,
                 second,
                 substitutions,
                 pairs,
+                heads,
                 width,
-                start_first,
-                window_first,
-                start_second,
-                window_second,
-                partner_first - start_first,
-                partner_second - start_second,
-                rows,
-                columns,
+                windows,
+                partner_first - windows.start_first,
+                partner_second - windows.start_second,
+                shape,
             ),
         )
 
@@ -640,7 +697,7 @@ def device_cofold_table(
     var rows = len(first)
     var columns = len(second)
     var cells = table_cells(rows, columns)
-    check_cell_range(rows, columns, substitutions, pairs, scoring)
+    check_cell_range(TableShape(rows, columns), substitutions, pairs, scoring)
     var partners_first = partner_index(first, pairs, alphabet_size)
     var partners_second = partner_index(second, pairs, alphabet_size)
     var plan = anti_diagonal_plan(rows, columns)
@@ -686,7 +743,8 @@ def device_cofold_table(
         )
     ctx.synchronize()
 
-    var table = List[Scalar[CellDType]](length=cells, fill=Scalar[CellDType](0))
+    # The copy overwrites every byte, so filling this first is a memset of the whole footprint.
+    var table = List[Scalar[CellDType]](unsafe_uninit_length=cells)
     """
     The whole table comes back because the traceback walks arbitrary cells of it. Copying element by element costs
     more than the sweep at any interesting size, so this is one move.
@@ -713,20 +771,20 @@ struct SankoffCase(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """The first head consumed against a gap."""
     comptime GAP_IN_FIRST = Self(2)
     """The second head consumed against a gap."""
-    comptime HELIX = Self(3)
+    comptime PAIRED = Self(3)
     """Both heads consumed, aligned and paired with a later column, which is where covariation is credited."""
 
 
 @fieldwise_init
 struct Decision(ImplicitlyCopyable, TrivialRegisterPassable):
-    """A winning chosen, with the two spans when it opened a helix."""
+    """A winning case, with the two reaches when it opened a pair."""
 
     var chosen: SankoffCase
-    """Which chosen reproduced the cell's stored score."""
+    """Which case reproduced the cell's stored score."""
     var reach_first: Int32
-    """How far the first head reaches to its partner, or zero when no helix opened."""
+    """How far the first head reaches to its partner, or zero when no pair opened."""
     var reach_second: Int32
-    """How far the second head reaches to its partner, or zero when no helix opened."""
+    """How far the second head reaches to its partner, or zero when no pair opened."""
 
 
 def winning_case(
@@ -737,27 +795,29 @@ def winning_case(
     pairs: ImmSpan[Scalar[SubstitutionDType], _],
     alphabet_size: Int,
     scoring: SankoffScoring,
-    start_first: Int,
-    window_first: Int,
-    start_second: Int,
-    window_second: Int,
+    windows: WindowPair,
 ) raises AffineGapsError -> Decision:
-    """Which chosen reproduces a cell's stored score, tried in the order the sweep tried them.
+    """Which case reproduces a cell's stored score, tried in the order the sweep tried them.
 
     Re-derived rather than recorded: the table is resident anyway, so a parallel array of
     decisions would cost as much again for nothing. The walk is one path rather than the whole
     table, so it tests each span for a possible pair instead of carrying the sweep's index.
     """
-    var rows = len(first)
-    var columns = len(second)
-    var stored = Int32(table[cell_index(start_first, window_first, start_second, window_second, rows, columns)])
-    var head_first = Int(first[start_first])
-    var head_second = Int(second[start_second])
-    var head_substitution = Int32(substitutions[head_first * alphabet_size + head_second])
-
-    var near = read_neighbours(
-        table.unsafe_ptr(), start_first, window_first, start_second, window_second, rows, columns
+    var shape = TableShape(len(first), len(second))
+    var stored = Int32(table[cell_index(windows, shape)])
+    var heads = paired_heads(
+        first.unsafe_ptr(),
+        second.unsafe_ptr(),
+        substitutions.unsafe_ptr(),
+        alphabet_size,
+        windows.start_first,
+        windows.start_second,
     )
+    var head_first = heads.first
+    var head_second = heads.second
+    var head_substitution = heads.substitution
+
+    var near = read_neighbours(table.unsafe_ptr(), windows, shape)
     if near.aligned + head_substitution == stored:
         return Decision(SankoffCase.ALIGNED, 0, 0)
     if near.gap_in_second + scoring.gap == stored:
@@ -765,30 +825,27 @@ def winning_case(
     if near.gap_in_first + scoring.gap == stored:
         return Decision(SankoffCase.GAP_IN_FIRST, 0, 0)
 
-    for reach_first in range(window_first - 1, 0, -1):
-        if pairs[head_first * alphabet_size + Int(first[start_first + reach_first])] <= 0:
+    for reach_first in range(windows.window_first - 1, MIN_TURN, -1):
+        if pairs[head_first * alphabet_size + Int(first[windows.start_first + reach_first])] <= 0:
             continue
-        for reach_second in range(window_second - 1, 0, -1):
-            if pairs[head_second * alphabet_size + Int(second[start_second + reach_second])] <= 0:
+        for reach_second in range(windows.window_second - 1, MIN_TURN, -1):
+            if pairs[head_second * alphabet_size + Int(second[windows.start_second + reach_second])] <= 0:
                 continue
-            var candidate = helix_candidate(
+            var candidate = paired_candidate(
                 table.unsafe_ptr(),
                 first.unsafe_ptr(),
                 second.unsafe_ptr(),
                 substitutions.unsafe_ptr(),
                 pairs.unsafe_ptr(),
+                heads,
                 alphabet_size,
-                start_first,
-                window_first,
-                start_second,
-                window_second,
+                windows,
                 reach_first,
                 reach_second,
-                rows,
-                columns,
+                shape,
             )
             if candidate == stored:
-                return Decision(SankoffCase.HELIX, Int32(reach_first), Int32(reach_second))
+                return Decision(SankoffCase.PAIRED, Int32(reach_first), Int32(reach_second))
     raise AffineGapsError(ErrorKind.INCONSISTENT_TABLE, "Sankoff traceback")
 
 
@@ -801,50 +858,35 @@ def expand_window(
     letters: ImmSpan[Byte, _],
     alphabet_size: Int,
     scoring: SankoffScoring,
-    start_first: Int,
-    window_first: Int,
-    start_second: Int,
-    window_second: Int,
+    windows: WindowPair,
     mut gapped_first: List[Byte],
     mut gapped_second: List[Byte],
     mut structure: List[Byte],
 ) raises:
     """Appends the columns one window contributes, left to right.
 
-    Every chosen consumes the two heads first, so the columns arrive in order without a separate
-    ordering pass, and a helix emits its opening column, what it encloses, its closing column and
+    Every case consumes the two heads first, so the columns arrive in order without a separate
+    ordering pass, and a pairing emits its opening column, what it encloses, its closing column and
     then whatever follows it.
     """
-    if window_first == 0 and window_second == 0:
+    if windows.window_first == 0 and windows.window_second == 0:
         return
-    if window_first == 0:
-        for offset in range(window_second):
+    if windows.window_first == 0:
+        for offset in range(windows.window_second):
             gapped_first.append(GAP_BYTE)
-            gapped_second.append(letters[Int(second[start_second + offset])])
+            gapped_second.append(letters[Int(second[windows.start_second + offset])])
             structure.append(UNPAIRED_BYTE)
         return
-    if window_second == 0:
-        for offset in range(window_first):
-            gapped_first.append(letters[Int(first[start_first + offset])])
+    if windows.window_second == 0:
+        for offset in range(windows.window_first):
+            gapped_first.append(letters[Int(first[windows.start_first + offset])])
             gapped_second.append(GAP_BYTE)
             structure.append(UNPAIRED_BYTE)
         return
 
-    var decision = winning_case(
-        table,
-        first,
-        second,
-        substitutions,
-        pairs,
-        alphabet_size,
-        scoring,
-        start_first,
-        window_first,
-        start_second,
-        window_second,
-    )
-    var head_first = letters[Int(first[start_first])]
-    var head_second = letters[Int(second[start_second])]
+    var decision = winning_case(table, first, second, substitutions, pairs, alphabet_size, scoring, windows)
+    var head_first = letters[Int(first[windows.start_first])]
+    var head_second = letters[Int(second[windows.start_second])]
 
     if decision.chosen == SankoffCase.ALIGNED:
         gapped_first.append(head_first)
@@ -859,10 +901,12 @@ def expand_window(
             letters,
             alphabet_size,
             scoring,
-            start_first + 1,
-            window_first - 1,
-            start_second + 1,
-            window_second - 1,
+            WindowPair(
+                windows.start_first + 1,
+                windows.window_first - 1,
+                windows.start_second + 1,
+                windows.window_second - 1,
+            ),
             gapped_first,
             gapped_second,
             structure,
@@ -880,10 +924,7 @@ def expand_window(
             letters,
             alphabet_size,
             scoring,
-            start_first + 1,
-            window_first - 1,
-            start_second,
-            window_second,
+            WindowPair(windows.start_first + 1, windows.window_first - 1, windows.start_second, windows.window_second),
             gapped_first,
             gapped_second,
             structure,
@@ -901,10 +942,7 @@ def expand_window(
             letters,
             alphabet_size,
             scoring,
-            start_first,
-            window_first,
-            start_second + 1,
-            window_second - 1,
+            WindowPair(windows.start_first, windows.window_first, windows.start_second + 1, windows.window_second - 1),
             gapped_first,
             gapped_second,
             structure,
@@ -924,16 +962,13 @@ def expand_window(
             letters,
             alphabet_size,
             scoring,
-            start_first + 1,
-            reach_first - 1,
-            start_second + 1,
-            reach_second - 1,
+            WindowPair(windows.start_first + 1, reach_first - 1, windows.start_second + 1, reach_second - 1),
             gapped_first,
             gapped_second,
             structure,
         )
-        gapped_first.append(letters[Int(first[start_first + reach_first])])
-        gapped_second.append(letters[Int(second[start_second + reach_second])])
+        gapped_first.append(letters[Int(first[windows.start_first + reach_first])])
+        gapped_second.append(letters[Int(second[windows.start_second + reach_second])])
         structure.append(CLOSE_BYTE)
         expand_window(
             table,
@@ -944,10 +979,12 @@ def expand_window(
             letters,
             alphabet_size,
             scoring,
-            start_first + reach_first + 1,
-            window_first - reach_first - 1,
-            start_second + reach_second + 1,
-            window_second - reach_second - 1,
+            WindowPair(
+                windows.start_first + reach_first + 1,
+                windows.window_first - reach_first - 1,
+                windows.start_second + reach_second + 1,
+                windows.window_second - reach_second - 1,
+            ),
             gapped_first,
             gapped_second,
             structure,
@@ -1020,10 +1057,7 @@ def cofold_from_table(
         letters,
         alphabet.byte_length(),
         scoring,
-        0,
-        rows,
-        0,
-        columns,
+        WindowPair(0, rows, 0, columns),
         gapped_first,
         gapped_second,
         structure,
@@ -1032,7 +1066,7 @@ def cofold_from_table(
         String(unsafe_from_utf8=gapped_first),
         String(unsafe_from_utf8=gapped_second),
         String(unsafe_from_utf8=structure),
-        Int32(table[cell_index(0, rows, 0, columns, rows, columns)]),
+        Int32(table[cell_index(WindowPair(0, rows, 0, columns), TableShape(rows, columns))]),
     )
 
 

@@ -99,6 +99,50 @@ check_raw_ceildiv() {
         "            Write 'ceildiv(a, b)' rather than '(a + b - 1) // b'."
 }
 
+check_prose_identifiers() {
+    local paths=()
+    [ ${#mojo_staged[@]} -gt 0 ] && paths+=("${mojo_staged[@]}")
+    [ ${#python_staged[@]} -gt 0 ] && paths+=("${python_staged[@]}")
+    [ ${#paths[@]} -gt 0 ] || return 0
+    local hits
+    # Backtick spans have to be tracked, which a regex alone cannot do, so this one filters in Python.
+    hits=$(python3 - "${paths[@]}" <<'PROSE'
+import re, sys
+
+TOKEN = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
+CODE = re.compile(r"^\s*(def|fn|var|comptime|from|import|struct|trait|alias|@|return|if|for|while|else|elif)\b")
+DOCTEST = re.compile(r"^\s*(>>>|\.\.\.)")
+
+for path in sys.argv[1:]:
+    inside = False
+    fenced = False
+    for number, line in enumerate(open(path, errors="ignore"), 1):
+        stripped = line.strip()
+        quotes = stripped.count('"""')
+        # A fenced block is code already, so backticking a path inside one would be wrong.
+        if stripped.startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        # A one-line docstring opens and closes on one line, so it never flips `inside`.
+        if (inside or stripped.startswith("#") or quotes == 2) and not CODE.match(stripped) \
+                and not DOCTEST.match(stripped) and "=" not in stripped:
+            text = stripped.lstrip("# ").strip('"')
+            spans = [(m.start(), m.end()) for m in re.finditer(r"`[^`]*`", text)]
+            for match in TOKEN.finditer(text):
+                if not any(a <= match.start() < b for a, b in spans):
+                    print(f"{path}:{number}: {match.group(0)}")
+        if quotes % 2 == 1:
+            inside = not inside
+PROSE
+)
+    [ -z "$hits" ] || fail "$hits"$'\n' \
+        "an identifier appears in prose without backticks." \
+        "            Either backtick it, or reword the sentence: a bulk rename that ran" \
+        "            through English leaves exactly this trace."
+}
+
 # endregion Code
 
 # region Toolchain Gates
@@ -152,6 +196,7 @@ check_backticked_complexity
 check_rulers
 check_superscript_spacing
 check_raw_ceildiv
+check_prose_identifiers
 check_mojo_format
 check_python_format
 

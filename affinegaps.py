@@ -55,6 +55,7 @@ from functools import cache, lru_cache
 from typing import Any
 
 from alignment import (
+    Mode,
     _needleman_wunsch_gotoh_recurrence,
     _needleman_wunsch_gotoh_score_recurrence,
     _reconstruct_alignment,
@@ -134,13 +135,6 @@ class Result(StrEnum):
 
     SCORE = "score"
     ALIGNMENT = "alignment"
-
-
-class Mode(StrEnum):
-    """Which of the two alignment problems the recurrence solves."""
-
-    GLOBAL = "global"
-    LOCAL = "local"
 
 
 @dataclass(frozen=True)
@@ -493,7 +487,7 @@ def smith_waterman_gotoh_alignment(
         extend,
         lambda x: substitution_alphabet[x],
         lambda i, j: i > 0 and j > 0 and scores[i, j] > 0,
-        flush_prefixes=False,
+        mode=Mode.LOCAL,
     )
     return first_gapped, second_gapped, int(scores[first_prefix, second_prefix])
 
@@ -633,7 +627,6 @@ def _build_parser() -> argparse.ArgumentParser:
     Subcommands rather than a mode flag because folding takes one sequence where the others take
     two, and because an affine `--open` and a linear `--gap` must never be offered together.
     """
-    import argparse
 
     shared = _placement_parser()
     parser = argparse.ArgumentParser(
@@ -645,7 +638,14 @@ def _build_parser() -> argparse.ArgumentParser:
     align = verbs.add_parser(Verb.ALIGN, parents=[shared], add_help=False, help="Gotoh alignment of two sequences")
     align.add_argument("first", help="The first sequence, like insulin GIVEQCCTSICSLYQLENYCN")
     align.add_argument("second", help="The second sequence, like glucagon HSQGTFTSDYSKYLDSRAEQDFV")
-    align.add_argument("--local", action="store_true", help="Smith-Waterman instead of Needleman-Wunsch")
+    align.add_argument(
+        "--local",
+        action="store_const",
+        dest="mode",
+        const=Mode.LOCAL,
+        default=Mode.GLOBAL,
+        help="Smith-Waterman instead of Needleman-Wunsch",
+    )
     align.add_argument("--match", type=int, help="Uniform match score, instead of scaled BLOSUM62")
     align.add_argument("--mismatch", type=int, help="Uniform mismatch score, instead of scaled BLOSUM62")
     align.add_argument("--open", type=int, help=f"Gap opening penalty, {AffineGapCosts().open} by default")
@@ -683,7 +683,7 @@ def _run_align(args) -> dict:
         open=defaults.open if args.open is None else args.open,
         extend=defaults.extend if args.extend is None else args.extend,
     )
-    aligner = smith_waterman_gotoh_alignment if args.local else needleman_wunsch_gotoh_alignment
+    aligner = smith_waterman_gotoh_alignment if args.mode is Mode.LOCAL else needleman_wunsch_gotoh_alignment
     first_gapped, second_gapped, score = aligner(
         args.first,
         args.second,
@@ -695,7 +695,7 @@ def _run_align(args) -> dict:
     )
     return {
         "operation": Verb.ALIGN,
-        "mode": "local" if args.local else "global",
+        "mode": args.mode,
         "first": args.first,
         "second": args.second,
         "first_gapped": first_gapped,
@@ -784,10 +784,7 @@ class Coloring(StrEnum):
 
 
 def _wants_color(choice: Coloring) -> bool:
-    """Whether to colour, which `auto` answers by asking if stdout is a terminal.
-
-    The previous rule was whether colorama imports, so a piped alignment carried escape codes.
-    """
+    """Whether to colour, which `auto` answers by asking if stdout is a terminal."""
     if choice is Coloring.NEVER:
         return False
     if choice is Coloring.ALWAYS:
@@ -795,11 +792,11 @@ def _wants_color(choice: Coloring) -> bool:
     return sys.stdout.isatty()
 
 
-def _render(record: dict, colored: bool) -> str:
+def _render(record: dict, coloring: Coloring) -> str:
     """One report per verb, its labels padded to a width that verb chooses for itself."""
     rows = REPORT_ROWS[record["operation"]]
     shown = dict(record)
-    if colored and "first_gapped" in shown:
+    if _wants_color(coloring) and "first_gapped" in shown:
         try:
             from colorama import init as start_colorama
 
@@ -824,7 +821,7 @@ def _report_placement(record: dict, backend: str, device: str, gpu_id: int, elap
     cells = record["cells"]
     rate = cells / elapsed / 1e6 if elapsed > 0 else float("inf")
     # The index only names something when there is an accelerator for it to name.
-    where = f"{device}:{gpu_id}" if device is Device.GPU else str(device)
+    where = f"{device}:{gpu_id}" if device is Device.GPU else f"{device}"
     print(f"  backend:     {backend} on {where}", file=sys.stderr)
     print(f"  cells:       {cells}", file=sys.stderr)
     print(f"  elapsed:     {elapsed * 1e3:.3f} ms", file=sys.stderr)
@@ -867,7 +864,7 @@ def main():
             payload["threads"] = args.threads
         print(json.dumps(payload))
     else:
-        print(_render(record, _wants_color(args.color)))
+        print(_render(record, args.color))
     if args.verbose:
         _report_placement(record, backend, device, args.gpu_id, elapsed)
 

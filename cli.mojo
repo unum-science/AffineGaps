@@ -328,7 +328,7 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
 
     var first_text = arguments[0]
     var second_text = arguments[1]
-    var mode_is_local = False
+    var mode = AlignmentMode.GLOBAL
     var opening = Int(DEFAULT_GAP_OPENING)
     var extension = Int(DEFAULT_GAP_EXTENSION)
     var match_score = Optional[Int]()
@@ -346,7 +346,7 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
             print(USAGE_ALIGN)
             return 0
         if flag == "--local":
-            mode_is_local = True
+            mode = AlignmentMode.LOCAL
             index += 1
             continue
         if index + 1 >= len(arguments):
@@ -385,59 +385,28 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
     var started = perf_counter_ns()
     var result = aligned_pair[AlignmentMode.LOCAL](
         left, right, substitutions, alphabet_size, scoring, alphabet, placement
-    ) if mode_is_local else aligned_pair[AlignmentMode.GLOBAL](
+    ) if mode == AlignmentMode.LOCAL else aligned_pair[AlignmentMode.GLOBAL](
         left, right, substitutions, alphabet_size, scoring, alphabet, placement
     )
     var elapsed = perf_counter_ns() - started
 
     if options.format == Format.JSON:
         print(
-            "{",
-            quote("operation"),
-            ": ",
-            quote("align"),
-            ", ",
-            quote("mode"),
-            ": ",
-            quote("local" if mode_is_local else "global"),
-            ", ",
-            quote("first"),
-            ": ",
-            quote(first_text),
-            ", ",
-            quote("second"),
-            ": ",
-            quote(second_text),
-            ", ",
-            quote("first_gapped"),
-            ": ",
-            quote(result.first_gapped),
-            ", ",
-            quote("second_gapped"),
-            ": ",
-            quote(result.second_gapped),
-            ", ",
-            quote("score"),
-            ": ",
-            Int(result.score),
-            ", ",
-            quote("backend"),
-            ": ",
-            quote("mojo"),
-            ", ",
-            quote("device"),
-            ": ",
-            quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
-            ", ",
-            quote("gpu_id"),
-            ": ",
-            placement.gpu_id,
-            ", ",
-            quote("threads"),
-            ": ",
-            placement.threads,
-            "}",
-            sep="",
+            String(
+                '{{"operation": "align", "mode": {}, "first": {}, "second": {},'
+                ' "first_gapped": {}, "second_gapped": {}, "score": {},'
+                ' "backend": "mojo", "device": {}, "gpu_id": {}, "threads": {}}}'
+            ).format(
+                quote("local" if mode == AlignmentMode.LOCAL else "global"),
+                quote(first_text),
+                quote(second_text),
+                quote(result.first_gapped),
+                quote(result.second_gapped),
+                Int(result.score),
+                quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+                placement.gpu_id,
+                placement.threads,
+            )
         )
     else:
         var first_shown = result.first_gapped
@@ -446,11 +415,11 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
             var painted = colorize(result.first_gapped, result.second_gapped)
             first_shown = painted[0]
             second_shown = painted[1]
-        print("Sequence 1:  ", first_text, sep="")
-        print("Sequence 2:  ", second_text, sep="")
-        print("Alignment 1: ", first_shown, sep="")
-        print("Alignment 2: ", second_shown, sep="")
-        print("Score:       ", Int(result.score), sep="")
+        print(String("Sequence 1:  {}").format(first_text))
+        print(String("Sequence 2:  {}").format(second_text))
+        print(String("Alignment 1: {}").format(first_shown))
+        print(String("Alignment 2: {}").format(second_shown))
+        print(String("Score:       {}").format(Int(result.score)))
 
     if options.verbose:
         report_placement(placement, options, len(left) * len(right), elapsed)
@@ -487,41 +456,21 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
 
     if options.format == Format.JSON:
         print(
-            "{",
-            quote("operation"),
-            ": ",
-            quote("fold"),
-            ", ",
-            quote("sequence"),
-            ": ",
-            quote(sequence_text),
-            ", ",
-            quote("structure"),
-            ": ",
-            quote(result.structure),
-            ", ",
-            quote("energy_kcal_per_mol"),
-            ": ",
-            energy,
-            ", ",
-            quote("backend"),
-            ": ",
-            quote("mojo"),
-            ", ",
-            quote("device"),
-            ": ",
-            quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
-            ", ",
-            quote("gpu_id"),
-            ": ",
-            placement.gpu_id,
-            "}",
-            sep="",
+            String(
+                '{{"operation": "fold", "sequence": {}, "structure": {}, "energy_kcal_per_mol": {},'
+                ' "backend": "mojo", "device": {}, "gpu_id": {}}}'
+            ).format(
+                quote(sequence_text),
+                quote(result.structure),
+                energy,
+                quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+                placement.gpu_id,
+            )
         )
     else:
-        print("Sequence:  ", sequence_text, sep="")
-        print("Structure: ", result.structure, sep="")
-        print("Energy:    ", energy, " kcal/mol", sep="")
+        print(String("Sequence:  {}").format(sequence_text))
+        print(String("Structure: {}").format(result.structure))
+        print(String("Energy:    {} kcal/mol").format(energy))
 
     if options.verbose:
         var length = sequence_text.byte_length()
@@ -584,54 +533,26 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
 
     if options.format == Format.JSON:
         print(
-            "{",
-            quote("operation"),
-            ": ",
-            quote("cofold"),
-            ", ",
-            quote("first"),
-            ": ",
-            quote(first_text),
-            ", ",
-            quote("second"),
-            ": ",
-            quote(second_text),
-            ", ",
-            quote("first_gapped"),
-            ": ",
-            quote(result.gapped_first),
-            ", ",
-            quote("second_gapped"),
-            ": ",
-            quote(result.gapped_second),
-            ", ",
-            quote("structure"),
-            ": ",
-            quote(result.structure),
-            ", ",
-            quote("score"),
-            ": ",
-            Int(result.score),
-            ", ",
-            quote("backend"),
-            ": ",
-            quote("mojo"),
-            ", ",
-            quote("device"),
-            ": ",
-            quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
-            ", ",
-            quote("gpu_id"),
-            ": ",
-            placement.gpu_id,
-            "}",
-            sep="",
+            String(
+                '{{"operation": "cofold", "first": {}, "second": {},'
+                ' "first_gapped": {}, "second_gapped": {}, "structure": {}, "score": {},'
+                ' "backend": "mojo", "device": {}, "gpu_id": {}}}'
+            ).format(
+                quote(first_text),
+                quote(second_text),
+                quote(result.gapped_first),
+                quote(result.gapped_second),
+                quote(result.structure),
+                Int(result.score),
+                quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+                placement.gpu_id,
+            )
         )
     else:
-        print("Sequence 1: ", first_text, sep="")
-        print("Sequence 2: ", second_text, sep="")
-        print("Structure:  ", result.structure, sep="")
-        print("Score:      ", Int(result.score), sep="")
+        print(String("Sequence 1: {}").format(first_text))
+        print(String("Sequence 2: {}").format(second_text))
+        print(String("Structure:  {}").format(result.structure))
+        print(String("Score:      {}").format(Int(result.score)))
 
     if options.verbose:
         var cells = first_text.byte_length() * second_text.byte_length()

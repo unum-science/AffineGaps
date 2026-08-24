@@ -174,10 +174,14 @@ BULGE_INITIATION = np.array(
 # fmt: on
 
 # fmt: off
-# Internal loop initiation by total unpaired count.
+# Internal loop initiation by total unpaired count. Sizes 0 and 1 cannot occur: a loop with
+# nothing on one side is a bulge and a loop with nothing on either is a stack, both priced
+# elsewhere. Sizes 2 and 3 are the 1x1 and 2x1 loops, which the source tables mark unreachable
+# because they always dispatch to their own lookup; without those tables the sentinel would make
+# the two commonest interior motifs cost three hundred kilocalories, so they carry a real value.
 INTERNAL_INITIATION = np.array(
 [
-      30000,   30000,   30000,   30000,      11,      20,      20,      21,
+      30000,   30000,      30,      30,      11,      20,      20,      21,
          23,      24,      25,      26,      27,      28,      29,      29,
          30,      31,      31,      32,      33,      33,      34,      34,
          35,      35,      35,      36,      36,      37,      37,

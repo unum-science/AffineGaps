@@ -12,14 +12,14 @@ dimensions and every cell on the anti-diagonal `window_first + window_second` is
 which is what the device sweep needs.
 
 The heads are gapped, aligned and unpaired, or aligned and paired with a later column, and that
-last case is the whole scan: it names the partner of each head and covers both a helix closing the
-window and a helix followed by more structure. Restricting the scan to partners the pair table
+last case is the whole scan: it names the partner of each head and covers both a pair closing the
+window and a pair followed by more structure. Restricting the scan to partners the pair table
 actually allows is what keeps it affordable, since only six of the sixteen letter pairs can close.
 The traceback tries partners from the furthest back, so a tie resolves to the longest helix and a
 stem comes out nested rather than chopped into neighbours. The fill's own order does not matter,
 because it keeps only a maximum.
 
-Cost is $O(n^6)$ in time and $O(n^2 m^2)$ in memory, and the memory is inherent: a helix at one
+Cost is $O(n^6)$ in time and $O(n^2 m^2)$ in memory, and the memory is inherent: a pairing at one
 layer reads every layer beneath it, so no Hirschberg-style band exists. Traceback is therefore
 free, since the whole table is resident regardless.
 
@@ -28,6 +28,8 @@ windows, which multiplies a table that is already the binding constraint.
 """
 
 # pyright: reportArgumentType=false, reportReturnType=false
+
+from enum import StrEnum
 
 import numpy as np
 
@@ -50,12 +52,28 @@ default_rna_pair_matrix = np.array(
 # Below any reachable score, with headroom for the penalties a reduction adds to the seed.
 UNREACHABLE = np.int32(np.iinfo(np.int32).min // 4)
 
-# The recurrence's cases, in the order the kernel tries them. The traceback walks the same order
-# and takes the first that reproduces the stored score, so ties resolve identically in both.
-CASE_ALIGNED = 0
-CASE_GAP_IN_SECOND = 1
-CASE_GAP_IN_FIRST = 2
-CASE_HELIX = 3
+# A pair has to enclose enough bases to turn the backbone around, the same floor `folding.py`
+# applies. Without it a head pairs with its own neighbour and the optimum is not a structure.
+MIN_TURN = 3
+# The turn, plus the partner past it: the shortest distance from a head to anything it can pair with.
+MIN_CLOSING_REACH = MIN_TURN + 1
+
+
+class SankoffCase(StrEnum):
+    """Which decomposition produced a cell's score, in the order the recurrence tries them.
+
+    The traceback walks that same order and takes the first case that reproduces the stored score,
+    so a tie resolves identically in the fill and in the walk.
+    """
+
+    ALIGNED = "aligned"
+    """Both heads consumed and aligned to each other, leaving that column unpaired."""
+    GAP_IN_SECOND = "gap_in_second"
+    """The first head consumed against a gap."""
+    GAP_IN_FIRST = "gap_in_first"
+    """The second head consumed against a gap."""
+    PAIRED = "paired"
+    """Both heads consumed, aligned and paired with a later column, which is where covariation is credited."""
 
 
 def partner_index(encoded: np.ndarray, pair_scores: np.ndarray, alphabet_size: int) -> tuple[np.ndarray, np.ndarray]:
@@ -76,12 +94,31 @@ def partner_index(encoded: np.ndarray, pair_scores: np.ndarray, alphabet_size: i
 
 
 @jit_if_available(nopython=True)
-def _helix_candidate(
+def _paired_heads(
+    encoded_first: np.ndarray,
+    encoded_second: np.ndarray,
+    substitution_matrix: np.ndarray,
+    start_first: int,
+    start_second: int,
+) -> tuple:
+    """What a cell's two heads contribute to every candidate they can open.
+
+    None of it depends on the partners, so a cell reads it once instead of once per candidate, and
+    the partner scan is the hottest loop in the recurrence.
+    """
+    head_first = encoded_first[start_first]
+    head_second = encoded_second[start_second]
+    return head_first, head_second, substitution_matrix[head_first, head_second]
+
+
+@jit_if_available(nopython=True)
+def _paired_candidate(
     table: np.ndarray,
     encoded_first: np.ndarray,
     encoded_second: np.ndarray,
     substitution_matrix: np.ndarray,
     pair_scores: np.ndarray,
+    heads: tuple,
     start_first: int,
     window_first: int,
     start_second: int,
@@ -89,9 +126,8 @@ def _helix_candidate(
     reach_first: int,
     reach_second: int,
 ) -> int:
-    """What one helix scores: its two closing columns, what they enclose, and what follows it."""
-    head_first = encoded_first[start_first]
-    head_second = encoded_second[start_second]
+    """What one pairing scores: its two closing columns, what they enclose, and what follows it."""
+    head_first, head_second, head_substitution = heads
     partner_first = encoded_first[start_first + reach_first]
     partner_second = encoded_second[start_second + reach_second]
     inside = table[start_first + 1, reach_first - 1, start_second + 1, reach_second - 1]
@@ -106,13 +142,13 @@ def _helix_candidate(
         + after
         + pair_scores[head_first, partner_first]
         + pair_scores[head_second, partner_second]
-        + substitution_matrix[head_first, head_second]
+        + head_substitution
         + substitution_matrix[partner_first, partner_second]
     )
 
 
 @jit_if_available(nopython=True)
-def _helix_best(
+def _paired_best(
     table: np.ndarray,
     encoded_first: np.ndarray,
     encoded_second: np.ndarray,
@@ -127,23 +163,28 @@ def _helix_best(
     start_second: int,
     window_second: int,
 ) -> int:
-    """The best helix the two heads can open, over every partner both windows can reach."""
+    """The best pairing the two heads can open, over every partner both windows can reach."""
     best = UNREACHABLE
-    head_first = encoded_first[start_first]
-    head_second = encoded_second[start_second]
-    low_first = bounds_first[head_first, start_first + 1]
+    heads = _paired_heads(encoded_first, encoded_second, substitution_matrix, start_first, start_second)
+    head_first, head_second, _ = heads
+    # Clamped to the window's own end, so a window too short to hold a hairpin yields no partners
+    # rather than reading past the bounds table.
+    floor_first = min(MIN_CLOSING_REACH, window_first)
+    floor_second = min(MIN_CLOSING_REACH, window_second)
+    low_first = bounds_first[head_first, start_first + floor_first]
     high_first = bounds_first[head_first, start_first + window_first]
-    low_second = bounds_second[head_second, start_second + 1]
+    low_second = bounds_second[head_second, start_second + floor_second]
     high_second = bounds_second[head_second, start_second + window_second]
     for index_first in range(high_first - 1, low_first - 1, -1):
         reach_first = positions_first[index_first] - start_first
         for index_second in range(high_second - 1, low_second - 1, -1):
-            candidate = _helix_candidate(
+            candidate = _paired_candidate(
                 table,
                 encoded_first,
                 encoded_second,
                 substitution_matrix,
                 pair_scores,
+                heads,
                 start_first,
                 window_first,
                 start_second,
@@ -157,7 +198,7 @@ def _helix_best(
 
 
 @jit_if_available(nopython=True)
-def _sankoff_cell(
+def _cofold_cell(
     table: np.ndarray,
     encoded_first: np.ndarray,
     encoded_second: np.ndarray,
@@ -173,7 +214,7 @@ def _sankoff_cell(
     start_second: int,
     window_second: int,
 ) -> int:
-    """Every case of one Sankoff cell, including the helix scan.
+    """Every case of one Sankoff cell, including the pairing scan.
 
     An empty window on either side can only be gapped through, which is what makes the base cases
     a pair of early returns rather than a branch wrapped around the whole body.
@@ -192,7 +233,7 @@ def _sankoff_cell(
     if candidate > best:
         best = candidate
 
-    candidate = _helix_best(
+    candidate = _paired_best(
         table,
         encoded_first,
         encoded_second,
@@ -239,7 +280,7 @@ def _sankoff_table_recurrence(
                 continue
             for start_first in range(rows - window_first + 1):
                 for start_second in range(columns - window_second + 1):
-                    table[start_first, window_first, start_second, window_second] = _sankoff_cell(
+                    table[start_first, window_first, start_second, window_second] = _cofold_cell(
                         table,
                         encoded_first,
                         encoded_second,
@@ -269,40 +310,42 @@ def _winning_case(
     window_first: int,
     start_second: int,
     window_second: int,
-) -> tuple[int, int, int]:
-    """Which case produced a cell's stored score, and the two spans when it opened a helix.
+) -> tuple[SankoffCase, int, int]:
+    """Which case produced a cell's stored score, and the two reaches when it opened a pair.
 
     Re-derived rather than recorded, because the table is resident anyway and a parallel array of
     decisions would cost as much again. The walk is one path rather than the whole table, so it
     tests each span for a possible pair instead of carrying the sweep's partner index.
     """
     stored = table[start_first, window_first, start_second, window_second]
-    head_first, head_second = encoded_first[start_first], encoded_second[start_second]
+    heads = _paired_heads(encoded_first, encoded_second, substitution_matrix, start_first, start_second)
+    head_first, head_second, _ = heads
 
     if (
         table[start_first + 1, window_first - 1, start_second + 1, window_second - 1]
         + substitution_matrix[head_first, head_second]
         == stored
     ):
-        return CASE_ALIGNED, 0, 0
+        return SankoffCase.ALIGNED, 0, 0
     if table[start_first + 1, window_first - 1, start_second, window_second] + gap == stored:
-        return CASE_GAP_IN_SECOND, 0, 0
+        return SankoffCase.GAP_IN_SECOND, 0, 0
     if table[start_first, window_first, start_second + 1, window_second - 1] + gap == stored:
-        return CASE_GAP_IN_FIRST, 0, 0
+        return SankoffCase.GAP_IN_FIRST, 0, 0
 
-    for reach_first in range(window_first - 1, 0, -1):
+    for reach_first in range(window_first - 1, MIN_TURN, -1):
         if pair_scores[head_first, encoded_first[start_first + reach_first]] <= 0:
             continue
-        for reach_second in range(window_second - 1, 0, -1):
+        for reach_second in range(window_second - 1, MIN_TURN, -1):
             if pair_scores[head_second, encoded_second[start_second + reach_second]] <= 0:
                 continue
             if (
-                _helix_candidate(
+                _paired_candidate(
                     table,
                     encoded_first,
                     encoded_second,
                     substitution_matrix,
                     pair_scores,
+                    heads,
                     start_first,
                     window_first,
                     start_second,
@@ -312,8 +355,8 @@ def _winning_case(
                 )
                 == stored
             ):
-                return CASE_HELIX, reach_first, reach_second
-    raise AssertionError("No case reproduces the stored score; the table and the traceback disagree")
+                return SankoffCase.PAIRED, reach_first, reach_second
+    raise ValueError("the table and the traceback disagree: no case reproduces the stored score")
 
 
 def _sankoff_traceback(
@@ -351,13 +394,13 @@ def _sankoff_traceback(
         )
         first_head, second_head = alphabet[encoded_first[start_first]], alphabet[encoded_second[start_second]]
 
-        if case == CASE_ALIGNED:
+        if case is SankoffCase.ALIGNED:
             left, right, shape = emit(start_first + 1, window_first - 1, start_second + 1, window_second - 1)
             return first_head + left, second_head + right, "." + shape
-        if case == CASE_GAP_IN_SECOND:
+        if case is SankoffCase.GAP_IN_SECOND:
             left, right, shape = emit(start_first + 1, window_first - 1, start_second, window_second)
             return first_head + left, "-" + right, "." + shape
-        if case == CASE_GAP_IN_FIRST:
+        if case is SankoffCase.GAP_IN_FIRST:
             left, right, shape = emit(start_first, window_first, start_second + 1, window_second - 1)
             return "-" + left, second_head + right, "." + shape
 

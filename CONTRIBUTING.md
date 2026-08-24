@@ -50,12 +50,12 @@ The Mojo kernels and the Python reference are held to the same recurrence, the s
 
 Four environment variables shape a run, and the first two are deliberately separate: one is breadth, the other is depth.
 
-| Variable | Default | Meaning |
-| :--- | :--- | :--- |
-| `AFFINEGAPS_REPETITIONS` | `10` | Random draws per randomized test |
-| `AFFINEGAPS_SCALE` | `1` | Multiplier on every exhaustive oracle's budget, and the highest frozen tier re-derived |
-| `AFFINEGAPS_SEED` | unset | Fixes the draws so a failure reproduces |
-| `AFFINEGAPS_BACKENDS` | all four | Narrows the backend axis |
+| Variable                 | Default  | Meaning                                                                                |
+| :----------------------- | :------- | :------------------------------------------------------------------------------------- |
+| `AFFINEGAPS_REPETITIONS` | `10`     | Random draws per randomized test                                                       |
+| `AFFINEGAPS_SCALE`       | `1`      | Multiplier on every exhaustive oracle's budget, and the highest frozen tier re-derived |
+| `AFFINEGAPS_SEED`        | unset    | Fixes the draws so a failure reproduces                                                |
+| `AFFINEGAPS_BACKENDS`    | all four | Narrows the backend axis                                                               |
 
 `AFFINEGAPS_REPETITIONS=100 AFFINEGAPS_SCALE=1` is a fuzzing run and `AFFINEGAPS_REPETITIONS=1 AFFINEGAPS_SCALE=4` is a release gate, which is why one number cannot express both.
 
@@ -75,6 +75,7 @@ The traceback stops at the first non-positive cell, so the untraced prefixes are
 Every recurrence is checked against enumerating the whole answer space, sharing no algorithm with the thing it checks.
 `test_scores_match_brute_force_enumeration` walks every alignment of every pair up to a combined length of `4 + AFFINEGAPS_SCALE` over a two-letter alphabet.
 `test_fold_matches_brute_force_enumeration` walks every nested structure a sequence admits and scores each one straight off the Turner tables, through a scorer that shares no code with `folding.py`.
+`test_cofold_matches_brute_force_enumeration` walks every alignment of a pair and every nested structure over each one; the alignment count grows as the central Delannoy number, so its inputs stay very short and `AFFINEGAPS_SCALE` decides how short.
 
 This is the only kind of oracle that can catch a recurrence which is self-consistently wrong on every backend at once, which is exactly what rewriting a recurrence risks.
 
@@ -86,11 +87,27 @@ They assert on every backend and cost microseconds; `AFFINEGAPS_SCALE` decides w
 `TURNER_FINGERPRINT` digests every energy table and scalar.
 Edit `turner.py` and that one test fails by name, instead of thirty energies failing at once with no indication why.
 
+### The Benchmark Suite
+
+`bench.py` is the whole measurement apparatus, and it reads `data/archive-ii` rather than anything vendored.
+
+```sh
+pixi run accuracy       # ArchiveII F1 against RNAstructure, per family
+pixi run speed          # the folding ladder against both reference folders
+python bench.py accuracy --cofold-pairs 20   # homologous pairs, scored as two structures
+```
+
+Two things about it are deliberate.
+It reads `.ct` and `.lis` only, because the `.seq` files beside them carry truncated titles and lowercase letters that RNAstructure reads as an instruction to forbid pairing; every sequence is reconstructed from its own reference instead.
+And the sampling rule is explicit rather than implied — index membership, a 400 nucleotide cap, then up to 120 per family under a recorded seed — so a published number can be regenerated rather than re-derived by hand.
+
+`--objective` decides whether `Fold` runs at its own defaults or at the model this project implements, and the two answers differ enough that quoting one without naming it would be misleading.
+
 ### Degenerate Limits
 
 Sankoff collapses to two simpler problems, and both answers come from outside this project.
 Give it a pair table where nothing can pair and it is Needleman-Wunsch with linear gaps, which BioPython answers — and the emitted rows must be a member of BioPython's own set of optimal alignments, not merely score the same.
-Give it a gap nobody can afford and a sequence against itself, and it is base-pair maximization scored twice, which an independently written Nussinov answers.
+Give it a gap nobody can afford and a sequence against itself, and it is base-pair maximization scored twice, which an independently written Nussinov answers — under the same steric floor the recurrence applies, so the two stay different algorithms rather than different chemistries.
 
 ### Constructions With a Provable Answer
 

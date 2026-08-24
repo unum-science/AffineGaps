@@ -24,6 +24,20 @@ colorama = "*"
 [feature.numba.dependencies]
 numba = ">=0.67.0,<0.68"
 
+# The reference folders this project is measured against. Their own channel, and their own
+# environment, so a contributor who only wants the tests never downloads them.
+[feature.bench]
+channels = ["bioconda", "conda-forge"]
+
+[feature.bench.dependencies]
+viennarna = ">=2.7"
+rnastructure = "*"
+consan = "*"
+
+# Published only to PyPI, and a Rust extension rather than the pure Python its repository suggests.
+[feature.bench.pypi-dependencies]
+seqfold = ">=0.10"
+
 # `[dependency-groups]`
 [feature.lint.dependencies]
 black = ">=26"
@@ -40,6 +54,8 @@ stringzilla = "*"
 # without failing, which is how NumBa went unexercised.
 [environments]
 default = ["color", "numba", "lint", "test"]
+# The rivals alone cannot run a comparison: the environment also needs what imports the package.
+bench = ["bench", "color", "numba", "test"]
 
 # A matching interpreter version makes `~/.local` visible inside the environment, where a stray
 # user-site install shadows the pinned one.
@@ -57,6 +73,9 @@ build-cli = {cmd = "mojo build cli.mojo -o build/affinegaps $MOJO_ACCELERATOR", 
 format = "mojo format -l 120 *.mojo"
 hooks = "git config core.hooksPath .githooks"
 test = {cmd = "pytest test.py", depends-on = ["build"]}
+# `data/archive-ii` has to resolve, and the rivals live in their own environment.
+accuracy = {cmd = "python bench.py accuracy --backend mojo --device gpu", depends-on = ["build"]}
+speed = {cmd = "python bench.py speed --backend mojo --device gpu", depends-on = ["build"]}
 
 # The checkers need this environment's interpreter to resolve NumPy and NumBa; that belongs here
 # rather than as a hardcoded path in the package metadata.

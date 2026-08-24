@@ -584,7 +584,7 @@ def hairpin_cost(sequence: str, opening: int, closing: int) -> int | None:
     """A hairpin closed by these two positions, or nothing when the model forbids it."""
     size = closing - opening - 1
     slot = pair_slot(sequence[opening], sequence[closing])
-    if size < folding.MIN_HAIRPIN or slot < 0:
+    if size < folding.MIN_TURN or slot < 0:
         return None
     tabulated = tabulated_hairpin(sequence, opening, closing, size)
     if tabulated is not None:
@@ -595,11 +595,13 @@ def hairpin_cost(sequence: str, opening: int, closing: int) -> int | None:
         initiation = int(turner.HAIRPIN_INITIATION[turner.LOOP_LIMIT]) + round(
             10.79 * math.log(size / turner.LOOP_LIMIT)
         )
-    if size == folding.MIN_HAIRPIN:
+    if size == folding.MIN_TURN:
         return initiation + helix_end_penalty(slot)
     inner_left = turner.BASES.index(sequence[opening + 1])
     inner_right = turner.BASES.index(sequence[closing - 1])
-    return initiation + int(turner.TERMINAL_MISMATCH_HAIRPIN[slot, inner_left, inner_right])
+    # The mismatch table prices the stack across the loop; the helix end is charged separately.
+    penalty = helix_end_penalty(slot)
+    return initiation + penalty + int(turner.TERMINAL_MISMATCH_HAIRPIN[slot, inner_left, inner_right])
 
 
 def loop_cost(sequence: str, opening: int, closing: int, inner_open: int, inner_close: int) -> int | None:
@@ -634,7 +636,8 @@ def loop_cost(sequence: str, opening: int, closing: int, inner_open: int, inner_
             turner.BASES.index(sequence[inner_open - 1]),
         ]
     )
-    return int(turner.INTERNAL_INITIATION[size]) + asymmetry + outer_mismatch + inner_mismatch
+    closure = helix_end_penalty(outer) + helix_end_penalty(reversed_inner)
+    return int(turner.INTERNAL_INITIATION[size]) + asymmetry + closure + outer_mismatch + inner_mismatch
 
 
 def dangle_cost(sequence: str, opening: int, closing: int) -> int:
@@ -720,7 +723,7 @@ def enumerate_fold_structures(sequence: str):
             yield ()
             return
         yield from below(start + 1, stop)
-        for partner in range(start + folding.MIN_HAIRPIN + 1, stop):
+        for partner in range(start + folding.MIN_CLOSING_REACH, stop):
             if (sequence[start], sequence[partner]) in PAIRABLE:
                 for inside in below(start + 1, partner):
                     for after in below(partner + 1, stop):
@@ -738,7 +741,7 @@ def count_fold_structures(sequence: str) -> int:
             return 1
         if (start, stop) not in seen:
             found = below(start + 1, stop)
-            for partner in range(start + folding.MIN_HAIRPIN + 1, stop):
+            for partner in range(start + folding.MIN_CLOSING_REACH, stop):
                 if (sequence[start], sequence[partner]) in PAIRABLE:
                     found += below(start + 1, partner) * below(partner + 1, stop)
             seen[(start, stop)] = found
@@ -755,6 +758,90 @@ def brute_force_fold(sequence: str) -> int:
         if energy is not None and energy < best:
             best = energy
     return best
+
+
+def enumerate_alignments(first: str, second: str):
+    """Every gapped pair of rows, by the three-way edit recursion."""
+    if not first and not second:
+        yield "", ""
+        return
+    if first and second:
+        for left, right in enumerate_alignments(first[1:], second[1:]):
+            yield first[0] + left, second[0] + right
+    if first:
+        for left, right in enumerate_alignments(first[1:], second):
+            yield first[0] + left, "-" + right
+    if second:
+        for left, right in enumerate_alignments(first, second[1:]):
+            yield "-" + left, second[0] + right
+
+
+def pairable_columns(gapped_first: str, gapped_second: str) -> dict:
+    """Columns a Sankoff pair may join, with their weight and the per-sequence hairpin floor applied.
+
+    The floor lives in each sequence's own coordinates, not the alignment's, because that is where
+    the recurrence measures a helix's reach.
+    """
+    position_first, position_second = {}, {}
+    for column in range(len(gapped_first)):
+        if gapped_first[column] != "-":
+            position_first[column] = len(position_first)
+        if gapped_second[column] != "-":
+            position_second[column] = len(position_second)
+    allowed = {}
+    for opening in range(len(gapped_first)):
+        for closing in range(opening + 1, len(gapped_first)):
+            if opening not in position_first or closing not in position_first:
+                continue
+            if opening not in position_second or closing not in position_second:
+                continue
+            if position_first[closing] - position_first[opening] < cofolding.MIN_CLOSING_REACH:
+                continue
+            if position_second[closing] - position_second[opening] < cofolding.MIN_CLOSING_REACH:
+                continue
+            weights = []
+            for row in (gapped_first, gapped_second):
+                left = COFOLD_ALPHABET.index(row[opening])
+                right = COFOLD_ALPHABET.index(row[closing])
+                weights.append(int(cofolding.default_rna_pair_matrix[left, right]))
+            if min(weights) <= 0:
+                continue
+            allowed[(opening, closing)] = sum(weights)
+    return allowed
+
+
+def brute_force_cofold(first: str, second: str) -> int:
+    """The Sankoff optimum over every alignment and every nested structure, by enumeration.
+
+    Shares no algorithm with the recurrence, which is what makes it the oracle that catches a fill
+    and a traceback agreeing on the same wrong answer.
+    """
+
+    def best_nesting(width: int, allowed: dict) -> int:
+        seen: dict = {}
+
+        def within(low: int, high: int) -> int:
+            if high - low < 2:
+                return 0
+            if (low, high) not in seen:
+                found = within(low + 1, high)
+                for partner in range(low + 1, high):
+                    weight = allowed.get((low, partner))
+                    if weight is None:
+                        continue
+                    found = max(found, weight + within(low + 1, partner) + within(partner + 1, high))
+                seen[(low, high)] = found
+            return seen[(low, high)]
+
+        return within(0, width)
+
+    best = None
+    for gapped_first, gapped_second in enumerate_alignments(first, second):
+        total = rescore_cofold(gapped_first, gapped_second, "." * len(gapped_first))
+        total += best_nesting(len(gapped_first), pairable_columns(gapped_first, gapped_second))
+        if best is None or total > best:
+            best = total
+    return best if best is not None else 0
 
 
 # endregion Brute Force Oracles
@@ -838,7 +925,7 @@ def turner_fingerprint() -> str:
     return digest.hexdigest()
 
 
-TURNER_FINGERPRINT = "56e7f9a51345536102ba7f870bc9bff1"
+TURNER_FINGERPRINT = "5994fabbce625616aca625d482ab7b1a"
 """The model every frozen folding energy below was derived against."""
 
 
@@ -849,6 +936,10 @@ identical, suboptimal answer: a one-character slip in a scan bound leaves the wh
 changes what `("GC", "GC")` scores."""
 
 
+# moved multiloop: -89 -> -84
+# moved interior-one-by-one: -8 -> 0
+# moved interior-one-by-two: -16 -> -14
+# moved interior-two-by-one: -24 -> -14
 FOLD_CASES: tuple[FoldCase, ...] = (
     FoldCase("empty", "", "", 0),
     FoldCase("single-base", "A", ".", 0),
@@ -900,7 +991,11 @@ FOLD_CASES: tuple[FoldCase, ...] = (
         -64,
         tier=2,
     ),
-    FoldCase("multiloop", "GCCCCGGGUCACCGGCAUUAAUGCGGGC", "(((((((....)))(((....)))))))", -89, tier=4),
+    FoldCase("multiloop", "GCCCCGGGUCACCGGCAUUAAUGCGGGC", "(((((((....)))(((....)))))))", -84, tier=4),
+    FoldCase("interior-one-by-one", "AGUGCUGACGUAAGGACU", "..................", 0),
+    FoldCase("interior-one-by-two", "GGAGUUGGAUAAACCGCCG", "((...(((.....))))).", -14),
+    FoldCase("interior-two-by-one", "CCCAUUUUCGUACGAUAUGG", ".((((..((....)).))))", -14),
+    FoldCase("interior-one-by-one-stacked", "GGGCAGCCAAAAGGCAGCCC", "((((.(((....))).))))", -96),
 )
 
 COFOLD_CASES: tuple[CofoldCase, ...] = (
@@ -910,28 +1005,39 @@ COFOLD_CASES: tuple[CofoldCase, ...] = (
     CofoldCase("first-empty-longer", "", "ACGU", "----", "ACGU", "....", -8),
     CofoldCase("single-match", "A", "A", "A", "A", ".", 2),
     CofoldCase("single-mismatch", "G", "C", "G", "C", ".", -1),
-    CofoldCase("no-minimum-hairpin", "GC", "GC", "GC", "GC", "()", 10),
-    CofoldCase("wobble-both-rows", "GU", "GU", "GU", "GU", "()", 6),
-    CofoldCase("covariation-across-wobble", "GC", "GU", "GC", "GU", "()", 5),
+    CofoldCase("minimum-hairpin-forbids-a-neighbour", "GC", "GC", "GC", "GC", "..", 4),
+    CofoldCase("minimum-hairpin-forbids-a-short-loop", "GAAC", "GAAC", "GAAC", "GAAC", "....", 8),
+    CofoldCase("shortest-legal-hairpin", "GAAAC", "GAAAC", "GAAAC", "GAAAC", "(...)", 16),
+    CofoldCase("wobble-both-rows", "GGGGU", "GGGGU", "GGGGU", "GGGGU", "(...)", 12),
+    CofoldCase("covariation-across-wobble", "GGGGC", "GGGGU", "GGGGC", "GGGGU", "(...)", 11),
+    CofoldCase("watson-crick-control", "GGGGC", "GGGGC", "GGGGC", "GGGGC", "(...)", 16),
     CofoldCase("homopolymer-match", "AAAA", "AAAA", "AAAA", "AAAA", "....", 8),
     CofoldCase("homopolymer-unpairable", "GGGG", "GGGG", "GGGG", "GGGG", "....", 8),
     CofoldCase("homopolymer-mismatch", "GGGG", "CCCC", "GGGG", "CCCC", "....", -4),
-    CofoldCase("sibling-helices", "CGAU", "CGAU", "CGAU", "CGAU", "()()", 18),
-    CofoldCase("sibling-then-nested", "CGAAUU", "CGAAUU", "CGAAUU", "CGAAUU", "()(())", 26),
-    CofoldCase("nested-depth-two", "GGCC", "GGCC", "GGCC", "GGCC", "(())", 20),
-    CofoldCase("nested-depth-three", "GGGCCC", "GGGCCC", "GGGCCC", "GGGCCC", "((()))", 30),
-    CofoldCase("alternating-pairs", "GCGCGC", "GCGCGC", "GCGCGC", "GCGCGC", "((()))", 30),
-    CofoldCase("helix-then-tail", "GGCCAA", "GGCCAA", "GGCCAA", "GGCCAA", "(())..", 24),
-    CofoldCase("head-then-helix", "AAGGCC", "AAGGCC", "AAGGCC", "AAGGCC", "..(())", 24),
+    CofoldCase("sibling-helices", "CAAAAGCAAAAG", "CAAAAGCAAAAG", "CAAAAGCAAAAG", "CAAAAGCAAAAG", "(....)(....)", 36),
+    CofoldCase(
+        "sibling-then-nested",
+        "CAAAAGCCAAAAGG",
+        "CAAAAGCCAAAAGG",
+        "CAAAAGCCAAAAGG",
+        "CAAAAGCCAAAAGG",
+        "(....)((....))",
+        46,
+    ),
+    CofoldCase("nested-depth-two", "CCAAAAGG", "CCAAAAGG", "CCAAAAGG", "CCAAAAGG", "((....))", 28),
+    CofoldCase("nested-depth-three", "CCCAAAAGGG", "CCCAAAAGGG", "CCCAAAAGGG", "CCCAAAAGGG", "(((....)))", 38),
+    CofoldCase("alternating-pairs", "CGCAAAAGCG", "CGCAAAAGCG", "CGCAAAAGCG", "CGCAAAAGCG", "(((....)))", 38),
+    CofoldCase("helix-then-tail", "CCAAAAGGAA", "CCAAAAGGAA", "CCAAAAGGAA", "CCAAAAGGAA", "((....))..", 32),
+    CofoldCase("head-then-helix", "AACCAAAAGG", "AACCAAAAGG", "AACCAAAAGG", "AACCAAAAGG", "..((....))", 32),
     CofoldCase("unequal-lengths", "AAAAA", "AAAA", "AAAAA", "AAAA-", ".....", 6),
-    CofoldCase("asymmetry-in-structure", "GGGGCCC", "GGGCCCC", "GGGGCCC", "GGGCCCC", "(((.)))", 29),
+    CofoldCase("asymmetry-in-structure", "GGGGCCC", "GGGCCCC", "GGGGCCC", "GGGCCCC", "((...))", 23),
     CofoldCase("nothing-pairs", "GAGAGA", "UCUCUC", "GAGAGA", "UCUCUC", "......", -6),
     CofoldCase("planted-stem", "GGGGAAAACCCC", "CCCCAAAAGGGG", "GGGGAAAACCCC", "CCCCAAAAGGGG", "((((....))))", 24),
-    CofoldCase("tie-three-optima", "GC", "UAUCU", "-G--C", "UAUCU", ".(..)", -3),
-    CofoldCase("tie-two-optima", "GU", "CGUU", "-G-U", "CGUU", ".(.)", 2),
-    CofoldCase("tie-five-optima", "UUAA", "CGCCU", "UUAA-", "CGCCU", ".(.).", -1),
-    CofoldCase("tie-gapped-both", "GACG", "CUAG", "GAC--G", "--CUAG", "..(..)", 2),
-    CofoldCase("tie-leading-gaps", "UAG", "AGGAC", "--UAG", "AGGAC", "..(.)", 0),
+    CofoldCase("tie-three-optima", "GC", "UAUCU", "G--C-", "UAUCU", ".....", -5),
+    CofoldCase("tie-two-optima", "GU", "CGUU", "-GU-", "CGUU", "....", 0),
+    CofoldCase("tie-five-optima", "UUAA", "CGCCU", "UUAA-", "CGCCU", ".....", -6),
+    CofoldCase("tie-across-equal-lengths", "GACG", "CUAG", "GACG", "CUAG", "....", -1),
+    CofoldCase("tie-trailing-gaps", "UAG", "AGGAC", "UAG--", "AGGAC", ".....", -4),
 )
 
 
@@ -1117,11 +1223,13 @@ def weighted_nussinov(sequence: str) -> int:
     best: dict = {}
 
     def within(low: int, high: int) -> int:
-        if high - low < 2:
+        # The same steric floor the recurrence applies, so this stays a different algorithm rather
+        # than a different chemistry.
+        if high - low < cofolding.MIN_CLOSING_REACH + 1:
             return 0
         if (low, high) not in best:
             found = within(low + 1, high)
-            for partner in range(low + 1, high):
+            for partner in range(low + cofolding.MIN_CLOSING_REACH, high):
                 weight = int(cofolding.default_rna_pair_matrix[codes[low], codes[partner]])
                 if weight > 0:
                     found = max(found, weight + within(low + 1, partner) + within(partner + 1, high))
@@ -1228,6 +1336,31 @@ def test_fold_matches_brute_force_enumeration():
     assert round(energy * 10) == brute_force_fold(sequence)
 
 
+@pytest.mark.repeat(randomized_repetitions_count)
+def test_cofold_matches_brute_force_enumeration(backend):
+    """Sankoff's optimum against enumerating every alignment and every structure over it.
+
+    The alignment count grows as the central Delannoy number, so the inputs stay short. It is the
+    only oracle here that can catch a fill and a traceback agreeing on the same wrong answer.
+    """
+    width = 3 + exhaustive_scale
+    first = random_rna(randint(1, width))
+    second = random_rna(randint(1, width))
+    _, _, _, score = sankoff_cofold(first, second, **backend)
+    assert score == brute_force_cofold(first, second)
+
+
+@pytest.mark.parametrize("case", COFOLD_CASES, ids=lambda case: case.tag)
+def test_frozen_cofolding_survives_enumeration(case: CofoldCase):
+    """The frozen cofolding corpus re-derived by enumeration rather than trusted.
+
+    Skipped where the alignment space is too wide to walk, which is what keeps a default run short.
+    """
+    if max(len(case.first), len(case.second)) > 4 + 2 * exhaustive_scale:
+        pytest.skip("alignment space too wide to enumerate at this scale")
+    assert brute_force_cofold(case.first, case.second) == case.score
+
+
 @pytest.mark.parametrize("case", FOLD_CASES, ids=lambda case: case.tag)
 def test_frozen_folding_survives_enumeration(case: FoldCase):
     """The frozen corpus re-derived by enumeration rather than trusted.
@@ -1258,7 +1391,7 @@ def test_fold_structures_are_well_formed(backend):
         left = folding.default_rna_alphabet.index(sequence[opening])
         right = folding.default_rna_alphabet.index(sequence[closing])
         assert turner.PAIR_INDEX[left, right] >= 0, f"{sequence[opening]}-{sequence[closing]} cannot pair"
-        assert closing - opening - 1 >= folding.MIN_HAIRPIN, "a hairpin closed too tightly"
+        assert closing - opening - 1 >= folding.MIN_TURN, "a hairpin closed too tightly"
 
 
 @pytest.mark.repeat(randomized_repetitions_count)
@@ -1313,10 +1446,12 @@ VERB_ARGUMENTS = (
 
 def run_python_cli(arguments: list) -> subprocess.CompletedProcess:
     """The Python entry point as a subprocess, so exit codes and streams are observable."""
+    # Loading the Mojo library rewrites `PYTHONPATH` in the C environ, which `os.environ` does not see.
     return subprocess.run(
         [sys.executable, str(pathlib.Path(__file__).parent / "affinegaps.py"), *arguments],
         capture_output=True,
         text=True,
+        env=os.environ.copy(),
     )
 
 
@@ -1386,7 +1521,7 @@ def test_a_negative_count_is_a_usage_error(flag: str):
     assert run_python_cli(["align", "GIVEQ", "HSQGT", flag, "-1"]).returncode == 2
 
 
-@pytest.mark.parametrize("arguments", VERB_ARGUMENTS, ids=lambda a: a[0] + "-" + str(len(a)))
+@pytest.mark.parametrize("arguments", VERB_ARGUMENTS, ids=lambda case: f"{case[0]}-{len(case)}")
 def test_both_binaries_agree(arguments: list):
     """Two parsers can drift, so the guard is that they answer identically, not that we were careful."""
     if not NATIVE_BINARY.exists():
@@ -1396,11 +1531,12 @@ def test_both_binaries_agree(arguments: list):
     pinned = [] if "--gpu-id" in arguments or "--device" in arguments else ["--device", "cpu"]
     native = subprocess.run([str(NATIVE_BINARY), *arguments, "--format", "json"], capture_output=True, text=True)
     hosted = run_python_cli([*arguments, "--format", "json", "--backend", "mojo", *pinned])
-    assert native.returncode == 0 and hosted.returncode == 0, native.stderr + hosted.stderr
+    error_streams = f"native stderr: {native.stderr}\nhosted stderr: {hosted.stderr}"
+    assert native.returncode == 0 and hosted.returncode == 0, error_streams
     assert json.loads(native.stdout) == json.loads(hosted.stdout)
 
 
-@pytest.mark.parametrize("arguments", VERB_ARGUMENTS, ids=lambda a: a[0] + "-" + str(len(a)))
+@pytest.mark.parametrize("arguments", VERB_ARGUMENTS, ids=lambda case: f"{case[0]}-{len(case)}")
 def test_json_carries_the_placement(arguments: list):
     """Every payload says which recurrence ran and where, so a log of runs is self-describing."""
     outcome = run_python_cli([*arguments, "--format", "json"])

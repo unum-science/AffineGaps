@@ -126,12 +126,14 @@ comptime BULGE_INITIATION: Array[Scalar[EnergyDType], 31] = [
 
 # fmt: off
 comptime INTERNAL_INITIATION: Array[Scalar[EnergyDType], 31] = [
-     30000,  30000,  30000,  30000,     11,     20,     20,     21,
+     30000,  30000,     30,     30,     11,     20,     20,     21,
         23,     24,     25,     26,     27,     28,     29,     29,
         30,     31,     31,     32,     33,     33,     34,     34,
         35,     35,     35,     36,     36,     37,     37,
 ]
-"""Internal loop initiation by total unpaired count."""
+"""Internal loop initiation by total unpaired count. Sizes 2 and 3 are the 1x1 and 2x1 loops,
+which the source tables mark unreachable because they dispatch to their own lookup; without those
+tables a sentinel here would price the two commonest interior motifs at three hundred kilocalories."""
 # fmt: on
 
 # fmt: off

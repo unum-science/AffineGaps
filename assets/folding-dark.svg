@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="934" height="500" viewBox="0 0 934 500" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" role="img" aria-label="Folding wall clock against input size, log-log">
+<svg xmlns="http://www.w3.org/2000/svg" width="934" height="500" viewBox="0 0 934 500" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" role="img" aria-label="RNA Folding Speed wall clock against input size, log-log">
 <rect width="934" height="500" rx="14" fill="#1a1a19"/>
 <text x="96" y="40" font-size="21" font-weight="650" fill="#ffffff">RNA Folding Speed</text>
 <text x="96" y="62" font-size="13" fill="#c3c2b7">Zuker over Turner 2004, structure reconstructed. Both axes logarithmic, lower is better.</text>
@@ -19,62 +19,75 @@
 <line x1="96" y1="404" x2="894" y2="404" stroke="#454541" stroke-width="1"/>
 <line x1="125.6" y1="404" x2="125.6" y2="409" stroke="#454541" stroke-width="1"/>
 <text x="125.6" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">128 nt</text>
-<line x1="231.1" y1="404" x2="231.1" y2="409" stroke="#454541" stroke-width="1"/>
-<text x="231.1" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">256 nt</text>
-<line x1="336.7" y1="404" x2="336.7" y2="409" stroke="#454541" stroke-width="1"/>
-<text x="336.7" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">512 nt</text>
-<line x1="442.2" y1="404" x2="442.2" y2="409" stroke="#454541" stroke-width="1"/>
-<text x="442.2" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 Knt</text>
-<line x1="547.8" y1="404" x2="547.8" y2="409" stroke="#454541" stroke-width="1"/>
-<text x="547.8" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">2 Knt</text>
-<line x1="653.3" y1="404" x2="653.3" y2="409" stroke="#454541" stroke-width="1"/>
-<text x="653.3" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4 Knt</text>
-<line x1="758.9" y1="404" x2="758.9" y2="409" stroke="#454541" stroke-width="1"/>
-<text x="758.9" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">8 Knt</text>
+<line x1="207.7" y1="404" x2="207.7" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="207.7" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">256 nt</text>
+<line x1="289.8" y1="404" x2="289.8" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="289.8" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">512 nt</text>
+<line x1="371.9" y1="404" x2="371.9" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="371.9" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 Knt</text>
+<line x1="454.0" y1="404" x2="454.0" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="454.0" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">2 Knt</text>
+<line x1="536.0" y1="404" x2="536.0" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="536.0" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4 Knt</text>
+<line x1="618.1" y1="404" x2="618.1" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="618.1" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">8 Knt</text>
+<line x1="700.2" y1="404" x2="700.2" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="700.2" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">16 Knt</text>
+<line x1="782.3" y1="404" x2="782.3" y2="409" stroke="#454541" stroke-width="1"/>
+<text x="782.3" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">32 Knt</text>
 <line x1="864.4" y1="404" x2="864.4" y2="409" stroke="#454541" stroke-width="1"/>
-<text x="864.4" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">16 Knt</text>
+<text x="864.4" y="424" font-size="11.5" text-anchor="middle" fill="#8a8980" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">64 Knt</text>
 <text x="495" y="448" font-size="12" text-anchor="middle" fill="#c3c2b7">sequence length, nucleotide bases</text>
 <text x="20" y="250" font-size="12" text-anchor="middle" fill="#c3c2b7" transform="rotate(-90 20 250)">wall clock</text>
-<line x1="786.0" y1="378.0" x2="878.0" y2="337.6" stroke="#8a8980" stroke-width="1.5" stroke-dasharray="4 4" stroke-linecap="round"/>
-<text x="874.0" y="328.6" font-size="12.5" text-anchor="end" fill="#8a8980">n³</text>
-<path d="M125.6,391.8 L231.1,375.5 L336.7,357.1 L442.2,335.6 L547.8,310.9 L653.3,277.9 L758.9,234.8 L864.4,192.6" fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="125.6" cy="391.8" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="231.1" cy="375.5" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="336.7" cy="357.1" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="442.2" cy="335.6" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="547.8" cy="310.9" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="653.3" cy="277.9" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="758.9" cy="234.8" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="864.4" cy="192.6" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
-<path d="M125.6,364.7 L231.1,326.7 L336.7,291.2 L442.2,248.1 L547.8,206.6 L653.3,158.1" fill="none" stroke="#d95926" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="125.6" cy="364.7" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="231.1" cy="326.7" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="336.7" cy="291.2" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="442.2" cy="248.1" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="547.8" cy="206.6" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="653.3" cy="158.1" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="442.2" cy="208.5" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
-<path d="M125.6,316.8 L231.1,316.8 L336.7,280.9 L442.2,252.4 L547.8,219.5 L653.3,186.0 L758.9,147.5 L864.4,108.3" fill="none" stroke="#c98500" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="125.6" cy="316.8" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="231.1" cy="316.8" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="336.7" cy="280.9" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="442.2" cy="252.4" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="547.8" cy="219.5" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="653.3" cy="186.0" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="758.9" cy="147.5" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="864.4" cy="108.3" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
-<path d="M125.6,299.2 L231.1,285.9 L336.7,250.0 L442.2,208.5 L547.8,163.9" fill="none" stroke="#199e70" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="125.6" cy="299.2" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="231.1" cy="285.9" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="336.7" cy="250.0" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="442.2" cy="208.5" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
-<circle cx="547.8" cy="163.9" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<line x1="786.0" y1="378.0" x2="878.0" y2="326.1" stroke="#8a8980" stroke-width="1.5" stroke-dasharray="4 4" stroke-linecap="round"/>
+<text x="874.0" y="317.1" font-size="12.5" text-anchor="end" fill="#8a8980">n³</text>
+<path d="M125.6,394.5 L207.7,378.0 L289.8,359.7 L371.9,339.2 L454.0,316.4 L536.0,286.1 L618.1,239.1 L700.2,199.7 L782.3,155.8 L864.4,106.8" fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="125.6" cy="394.5" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="207.7" cy="378.0" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="289.8" cy="359.7" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="371.9" cy="339.2" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="454.0" cy="316.4" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="536.0" cy="286.1" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="618.1" cy="239.1" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="700.2" cy="199.7" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="782.3" cy="155.8" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="864.4" cy="106.8" r="4" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+<path d="M125.6,370.3 L207.7,328.0 L289.8,291.8 L371.9,252.2 L454.0,213.1 L536.0,170.8" fill="none" stroke="#d95926" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="125.6" cy="370.3" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="207.7" cy="328.0" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="289.8" cy="291.8" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="371.9" cy="252.2" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="454.0" cy="213.1" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="536.0" cy="170.8" r="4" fill="#d95926" stroke="#1a1a19" stroke-width="2"/>
+<path d="M125.6,314.6 L207.7,289.5 L289.8,251.7 L371.9,209.3 L454.0,165.1" fill="none" stroke="#199e70" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="125.6" cy="314.6" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="207.7" cy="289.5" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="289.8" cy="251.7" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="371.9" cy="209.3" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="454.0" cy="165.1" r="4" fill="#199e70" stroke="#1a1a19" stroke-width="2"/>
+<path d="M125.6,350.4 L207.7,316.8 L289.8,285.3 L371.9,253.7 L454.0,220.1 L536.0,186.8 L618.1,148.8 L700.2,108.1" fill="none" stroke="#c98500" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="125.6" cy="350.4" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="207.7" cy="316.8" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="289.8" cy="285.3" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="371.9" cy="253.7" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="454.0" cy="220.1" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="536.0" cy="186.8" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="618.1" cy="148.8" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="700.2" cy="108.1" r="4" fill="#c98500" stroke="#1a1a19" stroke-width="2"/>
+<path d="M125.6,328.5 L207.7,277.5 L289.8,221.5 L371.9,162.2 L454.0,103.3" fill="none" stroke="#b978c6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="125.6" cy="328.5" r="4" fill="#b978c6" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="207.7" cy="277.5" r="4" fill="#b978c6" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="289.8" cy="221.5" r="4" fill="#b978c6" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="371.9" cy="162.2" r="4" fill="#b978c6" stroke="#1a1a19" stroke-width="2"/>
+<circle cx="454.0" cy="103.3" r="4" fill="#b978c6" stroke="#1a1a19" stroke-width="2"/>
 <circle cx="100" cy="472" r="4" fill="#3987e5"/>
 <text x="111" y="476" font-size="12.5" fill="#c3c2b7">AffineGaps, H100</text>
 <circle cx="245.8" cy="472" r="4" fill="#d95926"/>
 <text x="256.8" y="476" font-size="12.5" fill="#c3c2b7">AffineGaps, 1xSPR</text>
-<circle cx="404.7" cy="472" r="4" fill="#199e70"/>
-<text x="415.7" y="476" font-size="12.5" fill="#c3c2b7">RNAstructure Fold, 1xSPR</text>
-<circle cx="609.45" cy="472" r="4" fill="#c98500"/>
-<text x="620.45" y="476" font-size="12.5" fill="#c3c2b7">ViennaRNA RNAfold, 1xSPR</text>
+<circle cx="398.15" cy="472" r="4" fill="#199e70"/>
+<text x="409.15" y="476" font-size="12.5" fill="#c3c2b7">RNAstructure Fold, 1xSPR</text>
+<circle cx="596.3499999999999" cy="472" r="4" fill="#c98500"/>
+<text x="607.3499999999999" y="476" font-size="12.5" fill="#c3c2b7">ViennaRNA RNAfold, 1xSPR</text>
+<circle cx="794.55" cy="472" r="4" fill="#b978c6"/>
+<text x="805.55" y="476" font-size="12.5" fill="#c3c2b7">SeqFold, 1xSPR</text>
 </svg>

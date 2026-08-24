@@ -34,6 +34,8 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
     """A traceback found no case reproducing a stored score, so the fill and the walk disagree."""
 
     def write_to(self, mut writer: Some[Writer]):
+        # Every kind names itself, and a kind added without a line says so rather than borrowing
+        # the last one's sentence.
         if self == Self.UNKNOWN_SYMBOL:
             writer.write("a character outside the alphabet")
         elif self == Self.ALPHABET_TOO_LARGE:
@@ -50,8 +52,10 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
             writer.write("an argument was rejected")
         elif self == Self.NOT_ASCII:
             writer.write("unit-cost alignment handles ASCII only")
-        else:
+        elif self == Self.INCONSISTENT_TABLE:
             writer.write("the table and the traceback disagree")
+        else:
+            writer.write("an unnamed failure")
 
 
 @fieldwise_init

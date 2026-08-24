@@ -6,6 +6,7 @@ being obviously correct over being fast.
 """
 
 from collections.abc import Callable
+from enum import IntEnum, StrEnum
 import numpy as np
 
 from common import (
@@ -17,8 +18,32 @@ from common import (
     jit_if_available,
 )
 
-# Constants for operation codes
-MATCH, INSERT, DELETE, SUBSTITUTE = 0, 1, 2, 3
+
+class Mode(StrEnum):
+    """Which of the two alignment problems the recurrence solves.
+
+    Mirrors `AlignmentMode` in `alignment.mojo`, so the two files name the choice the same way.
+    """
+
+    GLOBAL = "global"
+    LOCAL = "local"
+
+
+class Layer(IntEnum):
+    """Which of Gotoh's three layers a score came from, and which one a traceback is inside.
+
+    Mirrors `Layer` in `alignment.mojo`. A walk never needs to know whether an aligning step
+    matched or substituted, so the two collapse into one layer and only the emitted letters
+    differ; those come from the sequences.
+    """
+
+    ALIGNING = 0
+    """The score came from aligning two symbols."""
+    DELETING = 1
+    """The score came from a run of gaps in the second sequence."""
+    INSERTING = 2
+    """The score came from a run of gaps in the first sequence."""
+
 
 # By default, we use BLOSUM62 with affine gap penalties
 # fmt: off
@@ -68,7 +93,7 @@ def _reconstruct_alignment(
     extend: int,
     code_to_char: Callable,
     should_continue: Callable,
-    flush_prefixes: bool = True,
+    mode: Mode = Mode.GLOBAL,
 ) -> tuple[str, str]:
     """Walks the three layers back, so a gap run is never charged twice.
 
@@ -79,27 +104,27 @@ def _reconstruct_alignment(
 
     first_gapped, second_gapped = "", ""
     i, j = len(encoded_first), len(encoded_second)
-    state = MATCH
+    state = Layer.ALIGNING
 
     # Backtrack to recover the alignment
     while should_continue(i, j):
-        if state == DELETE:
+        if state is Layer.DELETING:
             first_gapped += code_to_char(encoded_first[i - 1])
             second_gapped += "-"
             extends = deletes[i - 1, j] + extend > scores[i - 1, j] + opening
             i -= 1
-            state = DELETE if extends else MATCH
-        elif state == INSERT:
+            state = Layer.DELETING if extends else Layer.ALIGNING
+        elif state is Layer.INSERTING:
             first_gapped += "-"
             second_gapped += code_to_char(encoded_second[j - 1])
             extends = inserts[i, j - 1] + extend > scores[i, j - 1] + opening
             j -= 1
-            state = INSERT if extends else MATCH
-        elif changes[i, j] == DELETE:
-            state = DELETE
-        elif changes[i, j] == INSERT:
-            state = INSERT
-        else:  # MATCH or SUBSTITUTE
+            state = Layer.INSERTING if extends else Layer.ALIGNING
+        elif changes[i, j] == Layer.DELETING:
+            state = Layer.DELETING
+        elif changes[i, j] == Layer.INSERTING:
+            state = Layer.INSERTING
+        else:  # An aligning step, whether the two symbols matched or not
             first_gapped += code_to_char(encoded_first[i - 1])
             second_gapped += code_to_char(encoded_second[j - 1])
             i -= 1
@@ -108,7 +133,7 @@ def _reconstruct_alignment(
     # A global path must reach the origin, so whatever is left is genuinely aligned against gaps.
     # A local path stops wherever the score falls to zero, and everything before that is outside
     # the alignment entirely.
-    if not flush_prefixes:
+    if mode is Mode.LOCAL:
         return first_gapped[::-1], second_gapped[::-1]
 
     # Add remaining characters from `encoded_first` (with gaps in `encoded_second`)
@@ -173,10 +198,10 @@ def _levenshtein_alignment_recurrence(
     scores[0, 0] = 0
     for i in range(1, first_length + 1):
         scores[i, 0] = i
-        changes[i, 0] = DELETE
+        changes[i, 0] = Layer.DELETING
     for j in range(1, second_length + 1):
         scores[0, j] = j
-        changes[0, j] = INSERT
+        changes[0, j] = Layer.INSERTING
 
     # Fill the scoring matrix and track operations
     for i in range(1, first_length + 1):
@@ -190,13 +215,13 @@ def _levenshtein_alignment_recurrence(
             score = min(replace, delete, insert)
             scores[i, j] = score
 
-            # Determine the minimum cost operation, preserving the operation kind
+            # Determine the minimum cost operation
             if score == replace:
-                changes[i, j] = SUBSTITUTE if substitution else MATCH
+                changes[i, j] = Layer.ALIGNING
             elif score == delete:
-                changes[i, j] = DELETE
+                changes[i, j] = Layer.DELETING
             else:
-                changes[i, j] = INSERT
+                changes[i, j] = Layer.INSERTING
 
     return scores, changes
 
@@ -270,13 +295,13 @@ def _needleman_wunsch_gotoh_recurrence(
     for j in range(1, second_length + 1):
         scores[0, j] = opening + (j - 1) * extend
         deletes[0, j] = scores[0, j] + opening + extend
-        changes[0, j] = INSERT
+        changes[0, j] = Layer.INSERTING
 
     # Fill the scoring matrix
     for i in range(1, first_length + 1):
         scores[i, 0] = opening + (i - 1) * extend
         inserts[i, 0] = scores[i, 0] + opening + extend
-        changes[i, 0] = DELETE
+        changes[i, 0] = Layer.DELETING
 
         for j in range(1, second_length + 1):
             substitution = substitution_matrix[encoded_first[i - 1], encoded_second[j - 1]]
@@ -296,11 +321,11 @@ def _needleman_wunsch_gotoh_recurrence(
 
             # Track changes
             if score == replace:
-                changes[i, j] = MATCH if encoded_first[i - 1] == encoded_second[j - 1] else SUBSTITUTE
+                changes[i, j] = Layer.ALIGNING
             elif score == delete:
-                changes[i, j] = DELETE
+                changes[i, j] = Layer.DELETING
             else:
-                changes[i, j] = INSERT
+                changes[i, j] = Layer.INSERTING
 
     return scores, changes, deletes, inserts
 
@@ -413,7 +438,7 @@ def _smith_waterman_gotoh_recurrence(
     # in the "scores", and they are not considered as starting points in each iteration.
     scores[0, :] = 0
     deletes[0, :] = opening + extend
-    changes[0, :] = INSERT
+    changes[0, :] = Layer.INSERTING
 
     # Unlike Needleman-Wunsch, we also track the position of the maximum score.
     max_score = 0
@@ -423,7 +448,7 @@ def _smith_waterman_gotoh_recurrence(
     for i in range(1, first_length + 1):
         scores[i, 0] = 0
         inserts[i, 0] = opening + extend
-        changes[i, 0] = DELETE
+        changes[i, 0] = Layer.DELETING
 
         for j in range(1, second_length + 1):
             substitution = substitution_matrix[encoded_first[i - 1], encoded_second[j - 1]]
@@ -443,11 +468,11 @@ def _smith_waterman_gotoh_recurrence(
 
             # Track changes
             if score == replace:
-                changes[i, j] = MATCH if encoded_first[i - 1] == encoded_second[j - 1] else SUBSTITUTE
+                changes[i, j] = Layer.ALIGNING
             elif score == delete:
-                changes[i, j] = DELETE
+                changes[i, j] = Layer.DELETING
             else:
-                changes[i, j] = INSERT
+                changes[i, j] = Layer.INSERTING
 
             # Update max score and position
             if score > max_score:

@@ -49,13 +49,12 @@ During my exploration of existing implementations, I've noticed several bugs:
 
 ## Benchmarks
 
-Throughput first, against the same kernels compiled for one CPU core, with third-party tools where one implements the same recurrence.
-Every cell is __wall time · cell-update rate__, and a cell update is one evaluation of the innermost recurrence rather than one entry of the table — `n * m` for alignment, an interior-loop triangle plus a partner scan in each of the three unenclosed tables for folding, one helix candidate per window pair for cofolding.
-Counting the work rather than the storage is what lets the same unit describe all three: a rate over table entries would fall with length by construction for the two folding recurrences, which spend $O(n)$ and $O(n^2)$ work per entry.
+Throughput first, against the same kernels on one CPU core, with third-party tools where one implements the same recurrence.
+Every cell is __wall time · cell-update rate__, where a cell update is one evaluation of the innermost recurrence rather than one entry of the table.
 
 A dash is a run that did not finish inside five minutes or whose table exceeded a 24 GiB budget.
-Lengths climb by four where time is quadratic, by two where it is cubic and by half where it is sextic, so each ladder spans a comparable range of wall clock rather than a comparable range of length.
-Best of three below 4096 and a single run above, every answer checked against the serial sweep, and the third-party rows are command-line invocations, so their sub-100 ms cells are mostly process startup.
+Lengths climb by four where time is quadratic, by two where cubic and by half where sextic, so every ladder spans a comparable range of wall clock.
+Best of three below 4096 and a single run above; third-party rows are command-line invocations, so their sub-100 ms cells are mostly process startup.
 
 ### Protein Alignment Speed
 
@@ -64,61 +63,68 @@ Best of three below 4096 and a single run above, every answer checked against th
   <img alt="Alignment wall clock against pair length" src="assets/alignment-light.svg">
 </picture>
 
-| Variant           |               64 aa |              256 aa |              1 Kaa |               4 Kaa |               16 Kaa |               64 Kaa |            256 Kaa |                1 Maa |
-| :---------------- | ------------------: | ------------------: | -----------------: | ------------------: | -------------------: | -------------------: | -----------------: | -------------------: |
-| AffineGaps, H100  |   173 µs · 24 MCUPS |  287 µs · 229 MCUPS | 1.3 ms · 790 MCUPS | 4.7 ms · 3.58 GCUPS | 20.5 ms · 13.1 GCUPS | 59.0 ms · 72.8 GCUPS | 307 ms · 224 GCUPS | 2.36 s · 467 GCUPS ¹ |
-| AffineGaps, 1xSPR |    48 µs · 86 MCUPS |   660 µs · 99 MCUPS | 10.6 ms · 99 MCUPS |   179 ms · 94 MCUPS |    2.85 s · 94 MCUPS |    47.3 s · 91 MCUPS |                  — |                    — |
-| Parasail, 1xSPR   |   24 µs · 171 MCUPS |  155 µs · 423 MCUPS | 1.4 ms · 728 MCUPS | 29.4 ms · 571 MCUPS |   394 ms · 682 MCUPS | 7.22 s · 595 MCUPS ² |                  — |                    — |
-| EMBOSS, 1xSPR     | 110 ms · 37 KCUPS ³ | 70.0 ms · 936 KCUPS | 90.0 ms · 12 MCUPS |   680 ms · 25 MCUPS |  21.0 s · 13 MCUPS ² |                    — |                  — |                    — |
+| Variant           |               64 aa |              256 aa |              1 Kaa |               4 Kaa |               16 Kaa |               64 Kaa |            256 Kaa |              1 Maa |
+| :---------------- | ------------------: | ------------------: | -----------------: | ------------------: | -------------------: | -------------------: | -----------------: | -----------------: |
+| AffineGaps, H100  |   173 µs · 24 MCUPS |  287 µs · 229 MCUPS | 1.3 ms · 790 MCUPS | 4.7 ms · 3.58 GCUPS | 20.5 ms · 13.1 GCUPS | 59.0 ms · 72.8 GCUPS | 307 ms · 224 GCUPS | 2.36 s · 467 GCUPS |
+| AffineGaps, 1xSPR |    48 µs · 86 MCUPS |   660 µs · 99 MCUPS | 10.6 ms · 99 MCUPS |   179 ms · 94 MCUPS |    2.85 s · 94 MCUPS |    47.3 s · 91 MCUPS |                  — |                  — |
+| Parasail, 1xSPR   |   24 µs · 171 MCUPS |  155 µs · 423 MCUPS | 1.4 ms · 728 MCUPS | 29.4 ms · 571 MCUPS |   394 ms · 682 MCUPS | 7.22 s · 595 MCUPS ¹ |                  — |                  — |
+| BioPython, 1xSPR  |   172 µs · 24 MCUPS |  1.38 ms · 47 MCUPS | 19.5 ms · 54 MCUPS |   308 ms · 54 MCUPS |    4.88 s · 55 MCUPS |  78.1 s · 55 MCUPS ¹ |                  — |                  — |
+| EMBOSS, 1xSPR     | 110 ms · 37 KCUPS ² | 70.0 ms · 936 KCUPS | 90.0 ms · 12 MCUPS |   680 ms · 25 MCUPS |  21.0 s · 13 MCUPS ¹ |                    — |                  — |                  — |
 
 > Measured 23 August 2026, random protein pairs, BLOSUM62 scaled fivefold.
 > Columns are pair lengths in amino-acid "aa" residues.
 > No row is adaptive, so none depends on how similar the inputs are.
-> ¹ Still climbing; the card is not saturated.
-> ² Stops on memory: a stored traceback matrix costs bytes per cell.
-> ³ Dominated by process startup, as every command-line cell under a tenth of a second is.
+> ¹ Stops on memory: a stored traceback matrix costs bytes per cell.
+> ² Dominated by process startup, as every command-line cell under a tenth of a second is.
 
 ### RNA Folding Speed
+
+The long columns are where whole transcripts and genomes sit.
+An XIST lncRNA runs about 19 Knt, a SARS-CoV-2 genome is 29,903 bases, and the largest known RNA viruses reach roughly 41 Knt.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/folding-dark.svg">
   <img alt="Folding wall clock against sequence length" src="assets/folding-light.svg">
 </picture>
 
-| Variant             |               128 nt |               256 nt |               512 nt |                1 Knt |                2 Knt |                4 Knt |               8 Knt |                 16 Knt |
-| :------------------ | -------------------: | -------------------: | -------------------: | -------------------: | -------------------: | -------------------: | ------------------: | ---------------------: |
-| AffineGaps, H100    | 1.73 ms · 1.73 GCUPS | 3.59 ms · 4.51 GCUPS | 8.21 ms · 9.95 GCUPS | 21.5 ms · 20.5 GCUPS | 65.1 ms · 40.5 GCUPS |  286 ms · 59.7 GCUPS | 1.98 s · 60.3 GCUPS |    13.1 s · 68.6 GCUPS |
-| AffineGaps, 1xSPR   |  5.82 ms · 514 MCUPS |  32.1 ms · 504 MCUPS |   158 ms · 518 MCUPS |   1.09 s · 404 MCUPS |   6.99 s · 377 MCUPS | 61.7 s · 277 MCUPS ² |                   — |                      — |
-| ViennaRNA, 1xSPR    |   50.0 ms · 60 MCUPS |  50.0 ms · 324 MCUPS |   250 ms · 327 MCUPS |   900 ms · 490 MCUPS |   3.93 s · 671 MCUPS |   17.7 s · 964 MCUPS | 99.6 s · 1.20 GCUPS | 9.6 min · 1.56 GCUPS ¹ |
-| RNAstructure, 1xSPR |    110 ms · 27 MCUPS |    200 ms · 81 MCUPS |    1.00 s · 82 MCUPS |    6.44 s · 68 MCUPS |    47.6 s · 55 MCUPS |                    — |                   — |                      — |
+| Variant             |               128 nt |               256 nt |              512 nt |                1 Knt |                2 Knt |               4 Knt |               8 Knt |                 16 Knt |               32 Knt |              64 Knt |
+| :------------------ | -------------------: | -------------------: | ------------------: | -------------------: | -------------------: | ------------------: | ------------------: | ---------------------: | -------------------: | ------------------: |
+| AffineGaps, H100    | 1.53 ms · 1.86 GCUPS | 3.21 ms · 4.76 GCUPS | 7.3 ms · 10.4 GCUPS | 18.3 ms · 20.7 GCUPS | 50.9 ms · 40.8 GCUPS | 198 ms · 63.5 GCUPS | 1.63 s · 52.2 GCUPS |    9.56 s · 64.6 GCUPS | 1.1 min · 68.1 GCUPS | 10 min · 58.9 GCUPS |
+| AffineGaps, 1xSPR   |  4.54 ms · 629 MCUPS |  30.3 ms · 505 MCUPS |  153 ms · 492 MCUPS |   905 ms · 420 MCUPS |   5.24 s · 396 MCUPS |  34.9 s · 361 MCUPS |                   — |                      — |                    — |                   — |
+| ViennaRNA, 1xSPR    |  11.1 ms · 258 MCUPS |    50 ms · 306 MCUPS |  206 ms · 368 MCUPS |   847 ms · 448 MCUPS |   3.82 s · 544 MCUPS |  17.1 s · 737 MCUPS | 1.6 min · 906 MCUPS | 9.7 min · 1.06 GCUPS ¹ |                  — ² |                   — |
+| RNAstructure, 1xSPR |   55.2 ms · 52 MCUPS |    170 ms · 90 MCUPS |   929 ms · 81 MCUPS |    6.22 s · 61 MCUPS |    45.1 s · 46 MCUPS |                   — |                   — |                      — |                    — |                   — |
+| SeqFold, 1xSPR      |   29.5 ms · 97 MCUPS |    292 ms · 52 MCUPS |   3.59 s · 21 MCUPS |     51.3 s · 7 MCUPS |     12 min · 3 MCUPS |                   — |                   — |                      — |                    — |                   — |
 
-> Measured 23 August 2026, random RNA, Turner 2004 parameters.
+> Measured 24 August 2026, random RNA under a fixed seed, Turner 2004 parameters.
 > Columns are sequence lengths in nucleotide "nt" bases.
 > Every row is rated against this project's candidate count, so a third-party clock is normalized to the same work rather than to its own recurrence — compare the clock across rows, and the rate down a row.
 > ¹ Held in 1.45 GiB; time binds, not memory.
-> ² Where one core stops being practical.
+> ² Refused rather than slow: ViennaRNA calls 32,768 bases beyond its addressable range and skips the input, so its ceiling is 32,767.
 
 ### RNA Cofolding Speed
+
+The wide columns are where the accuracy corpus sits.
+ArchiveII's tmRNA and RNase P medians are 363 and 330 bases and its ninetieth percentile is 419, so 384 puts most of that corpus inside the exact sweep.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/cofolding-dark.svg">
   <img alt="Cofolding wall clock against sequence length" src="assets/cofolding-light.svg">
 </picture>
 
-| Variant             |                24 nt |                32 nt |                48 nt |                64 nt |                96 nt |               128 nt |              192 nt |              256 nt |
-| :------------------ | -------------------: | -------------------: | -------------------: | -------------------: | -------------------: | -------------------: | ------------------: | ------------------: |
-| AffineGaps, H100    | 0.84 ms · 1.01 GCUPS | 1.25 ms · 3.72 GCUPS | 3.77 ms · 9.99 GCUPS | 11.7 ms · 27.1 GCUPS | 68.5 ms · 49.4 GCUPS |  279 ms · 59.2 GCUPS | 3.94 s · 52.5 GCUPS | 16.9 s · 70.0 GCUPS |
-| AffineGaps, 1xSPR   |  2.63 ms · 323 MCUPS |  11.8 ms · 396 MCUPS |  92.9 ms · 406 MCUPS |   1.07 s · 296 MCUPS |   12.0 s · 282 MCUPS | 62.5 s · 264 MCUPS ¹ |                   — |                   — |
-| RNAstructure, 1xSPR |     170 ms · 5 MCUPS |    490 ms · 10 MCUPS |     4.30 s · 9 MCUPS |    22.9 s · 14 MCUPS |   4.5 min · 13 MCUPS |                    — |                   — |                   — |
+| Variant             |               24 nt |               32 nt |                48 nt |                64 nt |              96 nt |              128 nt |              192 nt |              256 nt |            320 nt |                 384 nt |
+| :------------------ | ------------------: | ------------------: | -------------------: | -------------------: | -----------------: | ------------------: | ------------------: | ------------------: | ----------------: | ---------------------: |
+| AffineGaps, H100    |  416 µs · 876 MCUPS | 773 µs · 2.89 GCUPS | 2.53 ms · 13.1 GCUPS | 7.41 ms · 23.7 GCUPS | 47 ms · 53.7 GCUPS | 220 ms · 70.6 GCUPS | 3.95 s · 44.8 GCUPS | 15.8 s · 56.5 GCUPS | 51.5 s · 75 GCUPS | 2.4 min · 84.2 GCUPS ¹ |
+| AffineGaps, 1xSPR   | 1.49 ms · 245 MCUPS | 6.83 ms · 327 MCUPS |    80 ms · 415 MCUPS |   624 ms · 281 MCUPS | 9.76 s · 259 MCUPS |  58.9 s · 264 MCUPS |                   — |                   — |                 — |                      — |
+| RNAstructure, 1xSPR |     84 ms · 4 MCUPS |   185 ms · 12 MCUPS |     8.51 s · 4 MCUPS |     21.6 s · 8 MCUPS |  9.5 min · 4 MCUPS |                   — |                   — |                   — |                 — |                      — |
 
-> Measured 23 August 2026, random RNA, covariance scoring.
+> Measured 24 August 2026, random RNA under a fixed seed, covariance scoring.
 > Columns are sequence lengths in nucleotide "nt" bases.
-> `dynalign` ran with `imaxseparation = n`, which switches its banding off, and scores Turner energies instead — so compare the clock, not the rate.
-> ¹ Where one core stops being practical.
+> `dynalign` ran unbanded and unpruned — `imaxseparation = n`, `singlefold_subopt_percent = 100`, `optimal_only = 1` — but it optimises Turner free energies where these rows optimise covariance, so its clock bounds a different question rather than the same one more slowly.
+> ¹ Memory binds: the table is quartic in the pair, so 384 bases fill 44 GB and 512 would need 139.
 
 ### Alignment Speed Against WFA2
 
-One __NVIDIA H100 80GB HBM3__ against __WFA2__ on one CPU core, both reconstructing the alignment rather than only scoring it.
+One NVIDIA H100 80GB HBM3 against WFA2 on one CPU core, both reconstructing the alignment rather than only scoring it.
 DNA pairs at 10 percent divergence, the range long-read work lives in, with every score checked to agree exactly before timing.
 
 ```
@@ -155,82 +161,45 @@ A four-megabase pair reconstructs inside a gigabyte of device memory, and doubli
 ### Folding Accuracy Against RNAstructure
 
 Accuracy is reported on __ArchiveII__, the Mathews lab set of 3,975 known structures across ten families that is the standard benchmark for thermodynamic folders.
-It plays the role here that BLOSUM62 and Biopython play on the protein side: an external reference this project is measured against rather than tuned on.
-The set is not vendored; the harness reads it from `data/archive-ii`.
+It plays the role here that BLOSUM62 and BioPython play on the protein side: an external reference this project is measured against rather than tuned on.
+The set is not vendored; `bench.py` reads it from `data/archive-ii`, admitting a family's own index, capping length at 400 bases and drawing 120 per family under a recorded seed.
 
 Every predicted pair is checked against the structure that was actually measured for that molecule, so both columns are contestants and neither one is the answer key.
 F1 runs from zero to one and rewards finding real pairs while punishing invented ones, so no folder can win by guessing generously.
 The last column subtracts the two scores sequence by sequence and averages, so a negative number means `Fold` won and the ± is how far that verdict would move on another sample of the same size.
 
-| Family         | Role                      | Sequences | AffineGaps F1 | RNAstructure F1 |     ΔF1 ± s.e. |
-| :------------- | :------------------------ | --------: | ------------: | --------------: | -------------: |
-| tRNA           | delivers amino acids      |       120 |         0.571 |           0.677 | −0.107 ± 0.028 |
-| 5S rRNA        | scaffolds the ribosome    |       120 |         0.615 |           0.610 | +0.005 ± 0.024 |
-| SRP RNA        | targets new proteins      |       120 |         0.626 |           0.630 | −0.003 ± 0.019 |
-| RNase P        | trims tRNA precursors     |       120 |         0.461 |           0.513 | −0.053 ± 0.013 |
-| tmRNA          | rescues stalled ribosomes |       120 |         0.379 |           0.390 | −0.011 ± 0.012 |
-| Group I intron | splices itself out        |        38 |         0.471 |           0.496 | −0.025 ± 0.027 |
+| Family         |                      Role | Sequences | AffineGaps F1 | RNAstructure F1 |     ΔF1 ± s.e. |
+| :------------- | ------------------------: | --------: | ------------: | --------------: | -------------: |
+| tRNA           |      delivers amino acids |       120 |         0.609 |           0.703 | −0.094 ± 0.025 |
+| 5S rRNA        |    scaffolds the ribosome |       120 |         0.652 |           0.609 | +0.043 ± 0.019 |
+| SRP RNA        |      targets new proteins |       120 |         0.704 |           0.690 | +0.014 ± 0.018 |
+| RNase P        |     trims tRNA precursors |       120 |         0.523 |           0.541 | −0.018 ± 0.013 |
+| tmRNA          | rescues stalled ribosomes |       120 |         0.452 |           0.452 | +0.000 ± 0.011 |
+| Group I intron |        splices itself out |        38 |         0.530 |           0.506 | +0.024 ± 0.020 |
 
-__Only tRNA and RNase P differ by more than their uncertainty.__
-On the other four families the reduced model is statistically indistinguishable from the complete one.
+__Only tRNA differs by more than twice its uncertainty__, and that difference is coaxial stacking, which `Fold` prices and this model does not.
+On the other five the reduced model matches or beats the complete one.
 `Fold`'s own numbers sit where the literature puts the Turner model, so the comparison is calibrated rather than flattering.
 
-## Installation
+## Quickstart
 
 There is no package-registry release; the repository is the distribution.
+
+```bash
+$ uv tool install git+https://github.com/unum-science/AffineGaps.git                       # the command
+$ uv pip install 'affinegaps[numba] @ git+https://github.com/unum-science/AffineGaps.git'  # the library
+$ affinegaps fold GGGGCAAAAGCCCC
+> Sequence:  GGGGCAAAAGCCCC
+> Structure: (((((....)))))
+> Energy:    -9.2 kcal/mol
+```
+
 Where Mojo ships a toolchain — Linux on x86-64 or ARM, and macOS on Apple silicon — the compiled kernels are built during the install and travel with the package.
-Everywhere else you get the NumPy reference alone, from the same command.
-
-### As a Python Package
-
-```bash
-uv pip install git+https://github.com/unum-science/AffineGaps.git
-uv pip install 'affinegaps[numba] @ git+https://github.com/unum-science/AffineGaps.git'
-```
-
-Pin a tag or a commit when the build has to be reproducible:
-
-```bash
-uv pip install 'affinegaps @ git+https://github.com/unum-science/AffineGaps.git@v0.2.5'
-```
-
-Two optional extras, neither of them required: `numba` accelerates the NumPy reference, and `color` paints the command-line output.
-
-### As a Command-Line Tool
-
-`uv tool install` puts `affinegaps` on your path without touching the current environment:
-
-```bash
-uv tool install git+https://github.com/unum-science/AffineGaps.git
-```
-
-The same tool is also built natively from a checkout, with no Python involved at run time:
-
-```bash
-git clone https://github.com/unum-science/AffineGaps.git && cd AffineGaps
-pixi run install      # `affinegaps` on the PATH, compiled kernels included
-pixi run build-cli    # or build/affinegaps, a standalone binary
-```
-
-Both accept the same verbs and print the same thing, so install whichever suits you rather than both.
-To run it once without installing anything, `uvx` fetches, builds and runs it in a throwaway environment:
-
-```bash
-uvx --from git+https://github.com/unum-science/AffineGaps.git affinegaps align GATTACA GACTATA
-```
-
-### As a Pixi Dependency
-
-A downstream [pixi](https://pixi.sh) project takes the same git dependency, pinned in `pixi.lock` beside everything else:
-
-```bash
-pixi add --pypi 'affinegaps @ git+https://github.com/unum-science/AffineGaps.git'
-```
-
-### Requirements for the GPU
-
-The compiled kernels run on the CPU anywhere Mojo builds them.
-Reaching the GPU additionally needs an NVIDIA device with driver 580 or newer, and `available("mojo", "gpu")` reports whether this machine has one — it tries a real alignment rather than assuming.
+Everywhere else the same command leaves the NumPy reference alone, which answers identically and slower.
+Two optional extras, neither of them required: `numba` accelerates that reference and `color` paints the alignment.
+A checkout builds the binary natively with `pixi run build-cli`, with no Python at run time, and `uvx --from git+https://github.com/unum-science/AffineGaps.git affinegaps` runs it once without installing anything.
+A downstream [pixi](https://pixi.sh) project takes the same git dependency through `pixi add --pypi`.
+Reaching the GPU needs an NVIDIA device with driver 580 or newer, and `available("mojo", "gpu")` reports whether this machine has one by trying a real alignment rather than assuming.
 
 ## Using the Library
 
@@ -335,6 +304,7 @@ The parameters in `turner.py` are the published Turner 2004 constants.
 The kernels use __stacking, loop initiation by size, terminal mismatches on hairpins and internal loops, the tabulated tri-, tetra- and hexaloops, dangling ends, Ninio's asymmetry correction, the linear multiloop rule and the terminal AU penalty__.
 
 They do __not__ use coaxial stacking, or the special tables for one-by-one, two-by-one and two-by-two internal loops.
+Those loops are priced by the generic formula instead, under an initiation fitted on ArchiveII rather than transcribed, and the helix-end charge is applied to them separately from the mismatch tables — which is the convention those tables are tabulated under.
 Dangles are charged to both neighbours of every helix placed in an exterior loop or a multiloop, which needs no extra states in the recurrence but slightly over-counts where two helices abut.
 
 So this remains __an exact implementation of a documented model__ rather than a drop-in replacement for a complete Turner folder.
@@ -361,7 +331,7 @@ print(score)           # 46, the optimum of the recurrence rather than a free en
 The structure is dot-bracket over the __alignment columns__, so one string describes the pairing both sequences agree on.
 
 The table is indexed by a window of each sequence, so it holds $O(n^2 m^2)$ cells, and __that memory is inherent rather than an implementation limit__.
-A helix at one layer reads every layer beneath it, so nothing can ever be retired.
+A pairing at one layer reads every layer beneath it, so nothing can ever be retired.
 Measured at $n = 24$, even a perfect freeing oracle leaves 75.5% of the table live at peak, which is why no Hirschberg-style band exists here and why the linear-memory claim is scoped to alignment.
 The consolation is that __traceback costs nothing extra__: the whole table is resident regardless, so reconstruction is a walk rather than a second pass.
 
@@ -398,7 +368,6 @@ To compute the optimal global alignment of insulin and glucagon sequences with t
 
 ```bash
 $ affinegaps align GIVEQCCTSICSLYQLENYCN HSQGTFTSDYSKYLDSRAEQDFV
->
 > Sequence 1:  GIVEQCCTSICSLYQLENYCN
 > Sequence 2:  HSQGTFTSDYSKYLDSRAEQDFV
 > Alignment 1: ---GIVEQCCTSICSLYQLENYCN----
@@ -411,7 +380,6 @@ Only the highest-scoring subalignment comes back, trimmed at both ends:
 
 ```bash
 $ affinegaps align GIVEQCCTSICSLYQLENYCN HSQGTFTSDYSKYLDSRAEQDFV --local
->
 > Sequence 1:  GIVEQCCTSICSLYQLENYCN
 > Sequence 2:  HSQGTFTSDYSKYLDSRAEQDFV
 > Alignment 1: TSICSLYQLEN
@@ -426,7 +394,6 @@ That last one defaults to the threads this process may actually run on, which an
 
 ```bash
 $ affinegaps fold GGGGCAAAAGCCCC
->
 > Sequence:  GGGGCAAAAGCCCC
 > Structure: (((((....)))))
 > Energy:    -9.2 kcal/mol
@@ -438,7 +405,6 @@ The verb takes no scoring flags, because the energies come from the Turner table
 
 ```bash
 $ affinegaps cofold GGGGCAAAAGCCCC GGGGCUUUUGCCCC
->
 > Sequence 1: GGGGCAAAAGCCCC
 > Sequence 2: GGGGCUUUUGCCCC
 > Structure:  (((((....)))))
@@ -456,9 +422,9 @@ Three groups, one per module, each naming what the tool does and where this diff
 
 - [WFA2](https://github.com/smarco/WFA2-lib) — exact and gap-affine, with time proportional to the alignment score rather than to the product of the lengths.
   That makes it the faster choice on near-identical sequences and the one that exhausts memory on divergent or very long ones, which is what the benchmark above measures.
-- [parasail](https://github.com/jeffdaily/parasail) — vectorised Smith-Waterman and Needleman-Wunsch for the CPU, with no accelerator path.
+- [Parasail](https://github.com/jeffdaily/parasail) — vectorised Smith-Waterman and Needleman-Wunsch for the CPU, with no accelerator path.
 - [SeqAn](https://github.com/seqan/seqan3) — a general sequence-analysis library whose aligner covers the same recurrences among much else.
-- [Biopython](https://biopython.org) — `PairwiseAligner` implements the same recurrences in Python, and is the readability reference rather than the speed one.
+- [BioPython](https://biopython.org) — `PairwiseAligner` implements the same recurrences in Python, and is the readability reference rather than the speed one.
 - [EMBOSS](http://emboss.open-bio.org) — `needle` is seemingly the only other open-source implementation that gets the initialization right, in `embAlignPathCalcWithEndGapPenalties` and `embAlignGetScoreNWMatrix` inside `nucleus/embaln.c`.
   It was [written in 1999 by Alan Bleasby](https://www.bioinformatics.nl/cgi-bin/emboss/help/needle) and rescored in 2000, carries no vectorisation, and is still widely recommended.
   It scores in `float`, which drifts on long sequences.
@@ -477,8 +443,8 @@ Three groups, one per module, each naming what the tool does and where this diff
 - Dynalign, shipped inside RNAstructure — Sankoff with a bound on how far the two alignments may diverge, cheap enough for sequences well past the reach of the exact sweep.
 - [Foldalign](https://rth.dk/resources/foldalign/) — a banded local variant, aimed at finding shared structured motifs rather than folding whole sequences together.
 
-Every tool in the last group approximates.
-This one does not, which is what makes it useful to them: an exact answer at a few hundred bases is the oracle a band can be measured against.
+Every tool in the last group approximates __by default__, and four can be made exact: Consan under `-f`, Stemloc under `--pleasekillme`, PMcomp with `-D` at the sequence length, and Foldalign with `-global -max_diff 0 -no_pruning`.
+None defaults to it and none runs on a GPU, which is what makes this useful to them: an exact answer at a few hundred bases is the oracle a band can be measured against.
 
 ## Citation
 

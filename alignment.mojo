@@ -10,7 +10,7 @@ insertion term of its left neighbour. This module sweeps anti-diagonals instead,
 cell of `d = i + j` reads only `d - 1` and `d - 2` and the whole above_left is independent.
 
 Traceback is Hirschberg with a Myers-Miller affine join, splitting on rows rather than
-anti-diagonals: a substitution anti_diagonal advances `i + j` by two and can skip a above_left entirely,
+anti-diagonals: a substitution step advances `i + j` by two and can skip an above-left cell entirely,
 while the row index advances by zero or one per anti_diagonal. The recursion bottoms out in a direct
 traceback over a stored decision tile.
 
@@ -76,7 +76,7 @@ comptime MAX_DYNAMIC_SHARED = max_dynamic_shared[BLOCKS_PER_MULTIPROCESSOR]()
 comptime WARPS_PER_BLOCK = THREADS_PER_BLOCK // WARP_SIZE
 comptime CARRY_BANDS = 2
 """
-A strip carries the score and insertion layers of the column to its left, one entering_run per row, which is what bounds how
+A strip carries the score and insertion layers of the column to its left, one entry per row, which is what bounds how
 long a first sequence one block can take.
 """
 comptime MAX_BAND_LENGTH = (MAX_DYNAMIC_SHARED - STATIC_SHARED_USED) // (CARRY_BANDS * 4) - 1
@@ -86,7 +86,7 @@ comptime MAX_BAND_LENGTH = (MAX_DYNAMIC_SHARED - STATIC_SHARED_USED) // (CARRY_B
 struct Layer(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Which of Gotoh's three layers a score came from, and which one a traceback is inside.
 
-    The walk never needs to know whether an aligning anti_diagonal matched or substituted, so the two
+    The walk never needs to know whether an aligning step matched or substituted, so the two
     collapse into one layer here; only the emitted letters differ, and those come from the
     sequences.
     """
@@ -140,7 +140,7 @@ struct Move(ImplicitlyCopyable, TrivialRegisterPassable):
     var column_advance: Int
     """How far it moves along the second, zero or one."""
     var lands_in: Layer
-    """Which layer the move arrives in, which decides what the next anti_diagonal may do."""
+    """Which layer the move arrives in, which decides what the next step may do."""
 
 
 # BLOSUM62 scaled by five, trimmed to the 23 letters the alphabet emits. The canonical table
@@ -219,6 +219,17 @@ struct AlignmentMode(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Needleman-Wunsch: the path spans both sequences end to end."""
     comptime LOCAL = Self(1)
     """Smith-Waterman: the score is clamped at zero and the best cell wins."""
+
+
+@always_inline
+def beats(score: Int32, place: Int64, best: Int32, best_place: Int64) -> Bool:
+    """Whether a candidate displaces the incumbent under the local tie rule.
+
+    A strictly better score always wins; an equal score wins only when it is non-zero and sits at an
+    earlier place. Every reduction and every scan reads this, so the device cannot resolve a tie
+    differently from the host.
+    """
+    return score > best or (score == best and score != 0 and place < best_place)
 
 
 @always_inline
@@ -329,8 +340,8 @@ def decide[
 def advance(state: Layer, decision: CellDecision) -> Move:
     """The traceback's transition function, shared by every walk in this file.
 
-    Entering a gap run from the aligning layer moves in the same anti_diagonal rather than re-reading the
-    cell, which the layered walk is free to do because that entering_run never moves on its own.
+    Entering a gap run from the aligning layer moves in the same step rather than re-reading the
+    cell, which the layered walk is free to do because that entry never moves on its own.
     """
     var layer = decision.source() if state == Layer.ALIGNING else state
     if layer == Layer.DELETING:
@@ -375,7 +386,6 @@ def serial_score[
     var scores_row = List[Int32](length=columns + 1, fill=Int32(0))
     var deletes_above = List[Int32](length=columns + 1, fill=Int32(0))
     var deletes_row = List[Int32](length=columns + 1, fill=Int32(0))
-    var inserts_above = List[Int32](length=columns + 1, fill=Int32(0))
     var inserts_row = List[Int32](length=columns + 1, fill=Int32(0))
 
     scores_above[0] = 0
@@ -414,7 +424,6 @@ def serial_score[
 
         swap(scores_above, scores_row)
         swap(deletes_above, deletes_row)
-        swap(inserts_above, inserts_row)
 
     if mode == AlignmentMode.LOCAL:
         return best
@@ -436,11 +445,14 @@ def serial_align[
     var columns = len(second)
     var stride = columns + 1
     var cells = (rows + 1) * stride
-    var scores = List[Int32](length=cells, fill=Int32(0))
-    var deletes = List[Int32](length=cells, fill=Int32(0))
-    var inserts = List[Int32](length=cells, fill=Int32(0))
+    var scores = List[Int32](unsafe_uninit_length=cells)
+    var deletes = List[Int32](unsafe_uninit_length=cells)
+    var inserts = List[Int32](unsafe_uninit_length=cells)
+    """The sweep writes every interior cell, and the two borders below are what the walk reads beyond them."""
 
     scores[0] = 0
+    deletes[0] = 0
+    inserts[0] = 0
     for column in range(1, stride):
         if mode == AlignmentMode.GLOBAL:
             scores[column] = scoring.open + Int32(column - 1) * scoring.extend
@@ -448,6 +460,7 @@ def serial_align[
         else:
             scores[column] = 0
             deletes[column] = scoring.open + scoring.extend
+        inserts[column] = 0
 
     var best = Int32(0)
     var best_row = 0
@@ -456,6 +469,7 @@ def serial_align[
     for row in range(1, rows + 1):
         var base = row * stride
         var above = base - stride
+        deletes[base] = 0
         if mode == AlignmentMode.GLOBAL:
             scores[base] = scoring.open + Int32(row - 1) * scoring.extend
             inserts[base] = scores[base] + scoring.open + scoring.extend
@@ -526,7 +540,7 @@ def reconstruct(
 ) -> Tuple[String, String]:
     """Three-state backward walk over the match, deletion and insertion layers.
 
-    The Python walks a single layer: after a deletion anti_diagonal it reads the winning operation of the
+    The Python walks a single layer: after a deletion step it reads the winning operation of the
     next cell instead of asking whether that deletion was opened or extended, so it can split one
     run into two and return a path that does not achieve its own reported score. Carrying the state
     fixes that. Ties resolve towards opening, which leaves the linear-gap case walking exactly as
@@ -621,6 +635,32 @@ struct Frame(Copyable, Movable, TrivialRegisterPassable):
     """Whether one is already open entering it from below."""
 
 
+struct SweepBands(Movable):
+    """The five row bands a linear-space sweep writes, sized for the widest frame it will see.
+
+    One recursion reuses the same bands for every frame, and a sweep writes each entry before it
+    reads it, so nothing here is filled at construction.
+    """
+
+    var scores_above: List[Int32]
+    """Score layer of the row above the one being computed."""
+    var deletes_above: List[Int32]
+    """Deletion layer of that same row."""
+    var scores_row: List[Int32]
+    """Score layer of the row being computed."""
+    var deletes_row: List[Int32]
+    """Deletion layer of that row."""
+    var inserts_row: List[Int32]
+    """Insertion layer of that row."""
+
+    def __init__(out self, columns: Int):
+        self.scores_above = List[Int32](unsafe_uninit_length=columns + 1)
+        self.deletes_above = List[Int32](unsafe_uninit_length=columns + 1)
+        self.scores_row = List[Int32](unsafe_uninit_length=columns + 1)
+        self.deletes_row = List[Int32](unsafe_uninit_length=columns + 1)
+        self.inserts_row = List[Int32](unsafe_uninit_length=columns + 1)
+
+
 def sweep_bands[
     half: SweepHalf
 ](
@@ -634,6 +674,7 @@ def sweep_bands[
     substitutions: ImmSpan[Scalar[SubstitutionDType], _],
     alphabet_size: Int,
     scoring: AffineGapCosts,
+    mut bands: SweepBands,
     final_scores: MutSpan[Int32, _],
     final_deletes: MutSpan[Int32, _],
 ):
@@ -644,27 +685,22 @@ def sweep_bands[
     """
     var rows = first_to - first_from
     var columns = second_to - second_from
-    var scores_above = List[Int32](length=columns + 1, fill=Int32(0))
-    var deletes_above = List[Int32](length=columns + 1, fill=Int32(0))
-    var scores_row = List[Int32](length=columns + 1, fill=Int32(0))
-    var deletes_row = List[Int32](length=columns + 1, fill=Int32(0))
-    var inserts_row = List[Int32](length=columns + 1, fill=Int32(0))
 
-    scores_above[0] = 0
-    deletes_above[0] = scoring.open + scoring.extend
+    bands.scores_above[0] = 0
+    bands.deletes_above[0] = scoring.open + scoring.extend
     # An open run arrives at the top-left corner only. Reaching any other cell of the top row
     # means the run already ended, so a deletion from there pays a fresh opening.
     for column in range(1, columns + 1):
-        scores_above[column] = scoring.open + Int32(column - 1) * scoring.extend
-        deletes_above[column] = scores_above[column] + scoring.open + scoring.extend
+        bands.scores_above[column] = scoring.open + Int32(column - 1) * scoring.extend
+        bands.deletes_above[column] = bands.scores_above[column] + scoring.open + scoring.extend
 
     for row in range(1, rows + 1):
         if entering_run == GapRun.EXTENDS:
-            scores_row[0] = Int32(row) * scoring.extend
+            bands.scores_row[0] = Int32(row) * scoring.extend
         else:
-            scores_row[0] = scoring.open + Int32(row - 1) * scoring.extend
-        deletes_row[0] = scores_row[0]
-        inserts_row[0] = scores_row[0] + scoring.open + scoring.extend
+            bands.scores_row[0] = scoring.open + Int32(row - 1) * scoring.extend
+        bands.deletes_row[0] = bands.scores_row[0]
+        bands.inserts_row[0] = bands.scores_row[0] + scoring.open + scoring.extend
 
         comptime reversed_order = half == SweepHalf.REVERSE
         var first_index = first_to - row if reversed_order else first_from + row - 1
@@ -672,24 +708,24 @@ def sweep_bands[
             var second_index = second_to - column if reversed_order else second_from + column - 1
             var substitution = Int32(substitutions[Int(first[first_index]) * alphabet_size + Int(second[second_index])])
             var cell = gotoh_cell[AlignmentMode.GLOBAL](
-                scores_above[column - 1],
-                scores_above[column],
-                deletes_above[column],
-                scores_row[column - 1],
-                inserts_row[column - 1],
+                bands.scores_above[column - 1],
+                bands.scores_above[column],
+                bands.deletes_above[column],
+                bands.scores_row[column - 1],
+                bands.inserts_row[column - 1],
                 substitution,
                 scoring,
             )
-            scores_row[column] = cell.score
-            deletes_row[column] = cell.deletion
-            inserts_row[column] = cell.insertion
+            bands.scores_row[column] = cell.score
+            bands.deletes_row[column] = cell.deletion
+            bands.inserts_row[column] = cell.insertion
 
-        swap(scores_above, scores_row)
-        swap(deletes_above, deletes_row)
+        swap(bands.scores_above, bands.scores_row)
+        swap(bands.deletes_above, bands.deletes_row)
 
     for column in range(columns + 1):
-        final_scores[column] = scores_above[column]
-        final_deletes[column] = deletes_above[column]
+        final_scores[column] = bands.scores_above[column]
+        final_deletes[column] = bands.deletes_above[column]
 
 
 def solve_rectangle(
@@ -717,16 +753,20 @@ def solve_rectangle(
     var columns = second_to - second_from
     var stride = columns + 1
     var cells = (rows + 1) * stride
-    var scores = List[Int32](length=cells, fill=Int32(0))
-    var deletes = List[Int32](length=cells, fill=Int32(0))
-    var inserts = List[Int32](length=cells, fill=Int32(0))
+    var scores = List[Int32](unsafe_uninit_length=cells)
+    var deletes = List[Int32](unsafe_uninit_length=cells)
+    var inserts = List[Int32](unsafe_uninit_length=cells)
+    """The sweep writes every interior cell, and the top row below is the only border either pass reads."""
 
     scores[0] = 0
+    deletes[0] = 0
+    inserts[0] = 0
     # An open run arrives at the top-left corner only. Reaching any other cell of the top row
     # means the run already ended, so a deletion from there pays a fresh opening.
     for column in range(1, stride):
         scores[column] = scoring.open + Int32(column - 1) * scoring.extend
         deletes[column] = scores[column] + scoring.open + scoring.extend
+        inserts[column] = 0
 
     for row in range(1, rows + 1):
         var base = row * stride
@@ -762,7 +802,7 @@ def solve_rectangle(
     if bottom == GapRun.EXTENDS:
         state = Layer.DELETING
 
-    # Only a row-consuming anti_diagonal records anything, so sibling subproblems tile the row axis.
+    # Only a row-consuming step records anything, so sibling subproblems tile the row axis.
     while row > 0 and column > 0:
         var here = row * stride + column
         var substitution = Int32(
@@ -872,8 +912,8 @@ def serial_hirschberg(
 ) raises:
     """Linear-space traceback: split on rows, join the two halves, recurse without recursion.
 
-    A substitution anti_diagonal advances `i + j` by two and can skip an anti-diagonal entirely, while the
-    row index advances by exactly zero or one per anti_diagonal, so the cut has to be a row. The two halves
+    A substitution step advances `i + j` by two and can skip an anti-diagonal entirely, while the
+    row index advances by exactly zero or one per step, so the cut has to be a row. The two halves
     are joined by Myers-Miller: either the path crosses in the match layer, or a deletion run
     straddles the cut, in which case both halves charged an opening and one is refunded.
     """
@@ -899,6 +939,8 @@ def serial_hirschberg(
     var forward_deletes = List[Int32](length=columns + 1, fill=Int32(0))
     var reverse_scores = List[Int32](length=columns + 1, fill=Int32(0))
     var reverse_deletes = List[Int32](length=columns + 1, fill=Int32(0))
+    var bands = SweepBands(columns)
+    """No frame is wider than the window, so one set of bands serves the whole recursion."""
 
     while len(frames) > 0:
         var frame = frames.pop()
@@ -938,6 +980,7 @@ def serial_hirschberg(
             substitutions,
             alphabet_size,
             scoring,
+            bands,
             forward_scores,
             forward_deletes,
         )
@@ -952,6 +995,7 @@ def serial_hirschberg(
             substitutions,
             alphabet_size,
             scoring,
+            bands,
             reverse_scores,
             reverse_deletes,
         )
@@ -1078,13 +1122,16 @@ def serial_local_extremum[
     settles on. Run backwards over the same prefixes, it instead reports how far the best local
     alignment reaches back, which is where the alignment starts.
     """
-    var scores_above = List[Int32](length=second_to + 1, fill=Int32(0))
-    var deletes_above = List[Int32](length=second_to + 1, fill=Int32(0))
-    var scores_row = List[Int32](length=second_to + 1, fill=Int32(0))
-    var deletes_row = List[Int32](length=second_to + 1, fill=Int32(0))
-    var inserts_row = List[Int32](length=second_to + 1, fill=Int32(0))
+    var scores_above = List[Int32](unsafe_uninit_length=second_to + 1)
+    var deletes_above = List[Int32](unsafe_uninit_length=second_to + 1)
+    var scores_row = List[Int32](unsafe_uninit_length=second_to + 1)
+    var deletes_row = List[Int32](unsafe_uninit_length=second_to + 1)
+    var inserts_row = List[Int32](unsafe_uninit_length=second_to + 1)
+    """Each row writes every entry it reads, and the top row below is the only border."""
 
+    scores_above[0] = 0
     for column in range(1, second_to + 1):
+        scores_above[column] = 0
         deletes_above[column] = scoring.open + scoring.extend
 
     var best = Int32(0)
@@ -1151,7 +1198,7 @@ def block_argmax(
     while reach > 0:
         var theirs = shuffle_down(winner, reach)
         var their_place = shuffle_down(winner_place, reach)
-        if theirs > winner or (theirs == winner and theirs != 0 and their_place < winner_place):
+        if beats(theirs, their_place, winner, winner_place):
             winner = theirs
             winner_place = their_place
         reach //= 2
@@ -1163,7 +1210,7 @@ def block_argmax(
         for index in range(1, WARPS_PER_BLOCK):
             var theirs = scores[unsafe_offset=index]
             var their_place = places[unsafe_offset=index]
-            if theirs > winner or (theirs == winner and theirs != 0 and their_place < winner_place):
+            if beats(theirs, their_place, winner, winner_place):
                 winner = theirs
                 winner_place = their_place
         scores[unsafe_offset=0] = winner
@@ -1259,8 +1306,8 @@ def strip_pair_kernel[
     """A recording strip: every decision is packed as the cell is computed, then walked back.
 
     A lane packs its `STRIP_COLUMNS` decisions into one word and stores it under `anti_diagonal` rather
-    than `row`. The 32 lanes of one anti_diagonal sit on 32 different rows but share the anti_diagonal, so the
-    anti_diagonal-major address makes the warp lay down 128 contiguous bytes where a row-major address
+    than `row`. The 32 lanes of one anti-diagonal sit on 32 different rows but share the anti-diagonal, so the
+    An anti-diagonal-major address makes the warp lay down 128 contiguous bytes where a row-major address
     would scatter the same warp over 32 sectors. The walk inverts it in closed form.
 
     Four bits hold a cell because `advance` reads exactly the source layer and the two run flags,
@@ -1403,7 +1450,7 @@ def strip_pair_kernel[
         while span < UInt32(STRIP_LANES):
             var theirs = shuffle_xor(best, span)
             var their_place = shuffle_xor(best_place, span)
-            if theirs > best or (theirs == best and theirs != 0 and their_place < best_place):
+            if beats(theirs, their_place, best, best_place):
                 best = theirs
                 best_place = their_place
             span *= 2
@@ -1569,6 +1616,7 @@ def device_alignments[
 
 def device_hirschberg(
     ctx: DeviceContext,
+    mut buffers: SweepBuffers,
     first: ImmSpan[Scalar[SymbolDType], _],
     second: ImmSpan[Scalar[SymbolDType], _],
     window_first_from: Int,
@@ -1594,16 +1642,8 @@ def device_hirschberg(
         raise AffineGapsError(ErrorKind.INVALID_SCORING, "gap opening cheaper than extension")
 
     var rows = len(first)
-    var columns = len(second)
+    """The second sequence is staged after the first, so its indices carry that offset."""
     path_columns[window_first_to] = Int32(window_second_to)
-
-    var sequences = List[Scalar[SymbolDType]](capacity=rows + columns)
-    for index in range(rows):
-        sequences.append(first[index])
-    for index in range(columns):
-        sequences.append(second[index])
-
-    var buffers = device_sweep_buffers(ctx, rows, columns, Span(sequences), substitutions)
 
     var frames = List[Frame]()
     frames.append(
@@ -1675,7 +1715,6 @@ def device_hirschberg(
             var frame = splitting[index]
             var split = (frame.first_from + frame.first_to) // 2
             var width = frame.second_to - frame.second_from
-            # The second sequence is stored after the first, so its indices carry that offset.
             sweeps.append(
                 Sweep(
                     split - frame.first_from,
@@ -1778,8 +1817,8 @@ pays the skew ramp again.
 
 comptime PlanDType = DType.int64
 """
-rows, columns, first_from, second_from, row_base, column_base, corner_base, entering_run, half, tile_rows_count,
-tile_columns_count, tile_height A device buffer is typed by `DType`, so the plan travels as words and is read back
+`rows`, `columns`, `first_from`, `second_from`, `row_base`, `column_base`, `corner_base`, `entering_run`, `half`, `tile_rows_count`,
+`tile_columns_count`, `tile_height`. A device buffer is typed by `DType`, so the plan travels as words and is read back
 through this struct on both sides. Naming the fields once is what recording the host writer and the two device readers
 from disagreeing about a position seven hundred lines apart.
 """
@@ -1887,7 +1926,7 @@ def tiled_sweep_kernel[
     var corner_rows = tile_rows_count + 1
     """
     A corner is written on one tile-anti-diagonal and read on the next but one, by exactly one tile, so three rotating
-    buffers of one entering_run per tile row hold every live corner at once.
+    buffers of one entry per tile row hold every live corner at once.
     """
     var slot = Int(block_idx.x)
 
@@ -1922,7 +1961,7 @@ def tiled_sweep_kernel[
 
     var edge_scores = stack_allocation[TILE_SIDE, Scalar[ScoreDType], address_space=AddressSpace.SHARED]()
     """
-    The tile's left column, staged once by the whole warp. Lane zero consumes one entering_run per anti_diagonal, and a global load
+    The tile's left column, staged once by the whole warp. Lane zero consumes one entry per anti-diagonal, and a global load
     there would sit on the dependency chain that feeds every shuffle. Staging also decouples the read of the
     neighbour's frontier from this tile's write of its own, which land in the same slots.
     """
@@ -2058,14 +2097,14 @@ def tiled_sweep_kernel[
         while span < UInt32(STRIP_LANES):
             var theirs = shuffle_xor(best_cell, span)
             var their_place = shuffle_xor(best_at, span)
-            if theirs > best_cell or (theirs == best_cell and theirs != 0 and their_place < best_at):
+            if beats(theirs, their_place, best_cell, best_at):
                 best_cell = theirs
                 best_at = their_place
             span *= 2
         if thread_idx.x == 0:
             var held = block_best[unsafe_offset=slot]
             """One launch per tile-anti-diagonal, so this slot accumulates rather than replaces."""
-            if best_cell > held or (best_cell == held and best_cell != 0 and best_at < block_place[unsafe_offset=slot]):
+            if beats(best_cell, best_at, held, block_place[unsafe_offset=slot]):
                 block_best[unsafe_offset=slot] = best_cell
                 block_place[unsafe_offset=slot] = best_at
 
@@ -2131,11 +2170,11 @@ def device_sweep_buffers(
     """
     Square-in-count tiling makes a sweep's tile grid as wide as it is tall, and a level's frames partition the
     columns, so the corner arrays of one level are bounded by twice the square of the full column count. Three
-    rotating buffers per sweep, each one entering_run per tile row. Linear in sequence length, where the full tile grid was
+    rotating buffers per sweep, each one entry per tile row. Linear in sequence length, where the full tile grid was
     quadratic and overflowed its own int32 plan field.
     """
     var block_slots = min(ceildiv(rows, MIN_TILE_HEIGHT), tile_columns_count) + 4
-    """Only a local scan writes here, and that is one sweep, so the grid is one tile-above_left wide."""
+    """Only a local scan writes here, and that is one sweep, so the grid is one tile-diagonal wide."""
     var buffers = SweepBuffers(
         ctx.enqueue_create_buffer[SymbolDType](max(rows + columns, 1)),
         ctx.enqueue_create_buffer[SubstitutionDType](len(substitutions)),
@@ -2285,7 +2324,7 @@ def device_local_extremum[
     with buffers.block_best.map_to_host() as scores, buffers.block_place.map_to_host() as places:
         for slot in range(min(slots, buffers.block_slots)):
             var candidate = scores[slot]
-            if candidate > best or (candidate == best and candidate != 0 and places[slot] < best_place):
+            if beats(candidate, places[slot], best, best_place):
                 best = candidate
                 best_place = places[slot]
     var stride = Int64(second_to + 1)
@@ -2348,24 +2387,16 @@ def device_sweep_level[
     if corner_base > buffers.corner_span or left_base > buffers.left_span or top_base > buffers.frontier_span:
         raise AffineGapsError(
             ErrorKind.SCRATCH_TOO_SMALL,
-            String(
-                "corner ",
-                corner_base,
-                "/",
-                buffers.corner_span,
-                " left ",
-                left_base,
-                "/",
-                buffers.left_span,
-                " top ",
-                top_base,
-                "/",
-                buffers.frontier_span,
+            String("corner {}/{} left {}/{} top {}/{}").format(
+                corner_base, buffers.corner_span, left_base, buffers.left_span, top_base, buffers.frontier_span
             ),
         )
 
-    var words = List[Scalar[PlanDType]](length=len(plan) * PLAN_WORDS, fill=Scalar[PlanDType](0))
-    """The plan crosses to the device as raw words, because a kernel takes a pointer, not a `List`."""
+    var words = List[Scalar[PlanDType]](unsafe_uninit_length=len(plan) * PLAN_WORDS)
+    """The plan crosses to the device as raw words, because a kernel takes a pointer, not a `List`.
+
+    Every word below is written, so filling first would be a memset immediately overwritten.
+    """
     var source = plan.unsafe_ptr().unsafe_bitcast[Scalar[PlanDType]]()
     for index in range(len(words)):
         words[index] = source[unsafe_offset=index]
@@ -2418,9 +2449,16 @@ def device_align[
     var path_columns = List[Int32](length=rows + 1, fill=Int32(0))
     var path_layers = List[Layer](length=rows + 1, fill=Layer.ALIGNING)
 
+    var sequences = List[Scalar[SymbolDType]](capacity=rows + columns)
+    sequences.extend(first)
+    sequences.extend(second)
+    var buffers = device_sweep_buffers(ctx, rows, columns, Span(sequences), substitutions)
+    """One scratch set for the whole alignment: the local scans and the recursion take it in turn."""
+
     comptime if mode == AlignmentMode.GLOBAL:
         device_hirschberg(
             ctx,
+            buffers,
             first,
             second,
             0,
@@ -2439,10 +2477,6 @@ def device_align[
         var whole = expand_path(first, second, path_columns, path_layers, alphabet, mode, 0, rows)
         return AlignmentResult(reached, whole[0], whole[1])
 
-    var sequences = List[Scalar[SymbolDType]](capacity=rows + columns)
-    sequences.extend(first)
-    sequences.extend(second)
-    var buffers = device_sweep_buffers(ctx, rows, columns, Span(sequences), substitutions)
     var last_row, last_column, score = device_local_extremum[SweepHalf.FORWARD](
         ctx, buffers, rows, rows, columns, alphabet_size, scoring
     )
@@ -2461,6 +2495,7 @@ def device_align[
         path_columns[last_row] = Int32(last_column)
         device_hirschberg(
             ctx,
+            buffers,
             first,
             second,
             first_row,

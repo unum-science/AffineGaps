@@ -112,7 +112,8 @@ def matrix_from(substitution: PythonObject, alphabet_size: Int) raises -> List[S
         given_mismatch = optional_int(substitution.mismatch)
     except:
         return default_proteins_matrix()
-    if not given_match:
+    # Both halves or neither: a record carrying only one would otherwise read an empty Optional.
+    if not given_match or not given_mismatch:
         return default_proteins_matrix()
     return uniform_matrix(alphabet_size, given_match.value(), given_mismatch.value())
 
