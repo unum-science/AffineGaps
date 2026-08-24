@@ -194,7 +194,7 @@ def _paired_best(
             )
             if candidate > best:
                 best = candidate
-    return best
+    return int(best)
 
 
 @jit_if_available(nopython=True)

@@ -10,7 +10,7 @@ presumes a base pair belongs to `folding.mojo`.
 from std.ffi import c_int, c_size_t, external_call
 from std.gpu.host.info import GPUInfo
 from std.memory import stack_allocation
-from std.sys.info import _accelerator_arch, has_accelerator
+from std.sys.info import CompilationTarget, _accelerator_arch, has_accelerator, num_logical_cores
 
 from max.gpu.host import DeviceBuffer, DeviceContext
 
@@ -83,18 +83,22 @@ def hardware_threads() -> Int:
     """Threads this process may actually run on, which an affinity mask or a cgroup quota narrows.
 
     The online CPU count is the wrong answer on a shared machine: it counts cores this process has
-    been forbidden from touching.
+    been forbidden from touching. Only Linux exposes such a mask, and `sched_getaffinity` is a
+    glibc symbol, so naming it anywhere else fails at link time rather than at run time.
     """
-    comptime WORDS = 16
-    var mask = stack_allocation[WORDS, UInt64]()
-    for index in range(WORDS):
-        mask[index] = 0
-    if Int(external_call["sched_getaffinity", c_int](c_int(0), c_size_t(WORDS * 8), mask)) != 0:
-        return 1
-    var total = 0
-    for index in range(WORDS):
-        total += Int(mask[index].reduce_bit_count())
-    return max(total, 1)
+
+    @parameter
+    if CompilationTarget.is_linux():
+        comptime WORDS = 16
+        var mask = stack_allocation[WORDS, UInt64]()
+        for index in range(WORDS):
+            mask[index] = 0
+        if Int(external_call["sched_getaffinity", c_int](c_int(0), c_size_t(WORDS * 8), mask)) == 0:
+            var total = 0
+            for index in range(WORDS):
+                total += Int(mask[index].reduce_bit_count())
+            return max(total, 1)
+    return max(Int(num_logical_cores()), 1)
 
 
 struct Placement(ImplicitlyCopyable, TrivialRegisterPassable):

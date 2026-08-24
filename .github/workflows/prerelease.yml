@@ -72,16 +72,21 @@ jobs:
   # here rather than in `pixi.toml` leaves a developer's own machine detecting its own card, and
   # covers both fleet targets rather than whichever one the runner guessed.
   build_mojo:
-    name: Mojo Compiles (${{ matrix.os }}, ${{ matrix.accelerator }})
+    name: Mojo Compiles (${{ matrix.os }}, ${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
-        accelerator: [sm_90a, sm_100a]
+        # Apple silicon carries no NVIDIA device, so macOS builds the host kernels alone.
+        include:
+          - {os: ubuntu-24.04, target: sm_90a, accelerator: --target-accelerator sm_90a}
+          - {os: ubuntu-24.04, target: sm_100a, accelerator: --target-accelerator sm_100a}
+          - {os: ubuntu-24.04-arm, target: sm_90a, accelerator: --target-accelerator sm_90a}
+          - {os: ubuntu-24.04-arm, target: sm_100a, accelerator: --target-accelerator sm_100a}
+          - {os: macos-14, target: host, accelerator: ""}
     env:
-      MOJO_ACCELERATOR: --target-accelerator ${{ matrix.accelerator }}
+      MOJO_ACCELERATOR: ${{ matrix.accelerator }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7

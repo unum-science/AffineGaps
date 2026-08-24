@@ -106,9 +106,11 @@ def hardware_threads() -> int:
     """Threads this process may actually run on, which an affinity mask or a cgroup quota narrows.
 
     The online CPU count is the wrong answer on a shared machine: it counts cores this process has
-    been forbidden from touching.
+    been forbidden from touching. Only Linux exposes such a mask.
     """
-    return max(len(os.sched_getaffinity(0)), 1)
+    if (allowed := getattr(os, "sched_getaffinity", None)) is not None:
+        return max(len(allowed(0)), 1)
+    return max(os.cpu_count() or 1, 1)
 
 
 @dataclass(frozen=True)
