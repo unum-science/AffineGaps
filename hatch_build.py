@@ -68,10 +68,9 @@ class MojoExtensionHook(BuildHookInterface):
         else:
             listing = subprocess.run(["ldd", str(extension)], capture_output=True, text=True)
             candidates = [
-                part.split(" (")[0].strip()
+                line.partition("=>")[2].partition(" (")[0].strip()
                 for line in listing.stdout.splitlines()
                 if "=>" in line
-                for part in [line.split("=>")[1]]
             ]
         for candidate in candidates:
             path = pathlib.Path(candidate)

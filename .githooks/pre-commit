@@ -99,6 +99,22 @@ check_raw_ceildiv() {
         "            Write 'ceildiv(a, b)' rather than '(a + b - 1) // b'."
 }
 
+# A `split` given a separator and then indexed at one end is `partition` written the long way. The
+# split form builds a whole list to throw most of it away, and `[1]` silently means "the rest" only
+# while `maxsplit` says so; `partition` always returns the same three parts and never raises.
+check_split_index() {
+    [ ${#python_staged[@]} -gt 0 ] || return 0
+    local hits
+    hits=$(
+        git grep --cached -nE '\.r?split\([^)]*, *1\)\[-?[01]\]' -- "${python_staged[@]}" || true
+        git grep --cached -nE "\.r?split\([\"'][^\"']*[\"']\)\[(0|-1)\]" -- "${python_staged[@]}" || true
+    )
+    [ -z "$hits" ] || fail "$hits"$'\n' \
+        "a split is indexed where a partition says it directly." \
+        "            Write 'text.partition(sep)[0]' rather than 'text.split(sep, 1)[0]'." \
+        "            A whitespace 'split(maxsplit=1)[0]' is exempt: partition cannot express it."
+}
+
 check_prose_identifiers() {
     local paths=()
     [ ${#mojo_staged[@]} -gt 0 ] && paths+=("${mojo_staged[@]}")
@@ -196,6 +212,7 @@ check_backticked_complexity
 check_rulers
 check_superscript_spacing
 check_raw_ceildiv
+check_split_index
 check_prose_identifiers
 check_mojo_format
 check_python_format

@@ -120,7 +120,7 @@ def read_structure(path: Path) -> Structure:
         raise ValueError(f"{path.name} holds letters outside ACGU: {''.join(sorted(unknown))}")
 
     stem = path.stem
-    return Structure(name=stem, family=stem.split("_", 1)[0], sequence=sequence, partners=tuple(partners))
+    return Structure(name=stem, family=stem.partition("_")[0], sequence=sequence, partners=tuple(partners))
 
 
 def read_family_index(family: str, root: Path = default_archive_root) -> tuple[str, ...]:
@@ -353,7 +353,7 @@ def fold_with_viennarna(sequence: str) -> str:
         check=True,
     )
     for line in result.stdout.splitlines():
-        candidate = line.split(" ", 1)[0]
+        candidate = line.partition(" ")[0]
         if candidate and set(candidate) <= set(".()"):
             return candidate
     raise ValueError("RNAfold emitted no structure")
@@ -601,7 +601,7 @@ def foreign_gpu_processes() -> list[str]:
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
-        pid = line.split(",", 1)[0].strip()
+        pid = line.partition(",")[0].strip()
         if pid != mine:
             found.append(line.strip())
     return found
