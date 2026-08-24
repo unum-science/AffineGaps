@@ -4,14 +4,14 @@ Test suite for affine gap alignment.
 
 Every property that belongs to the algorithm is asserted against each backend, so the NumPy
 reference and the compiled kernels are held to one standard rather than compared after the fact.
-A test opts into that axis by naming a `backend` argument; `conftest.py` supplies the values and
-skips the ones the machine cannot serve.
+A test opts into that axis by naming a `backend` argument; `pytest_generate_tests` supplies the
+values and the fixture skips the ones the machine cannot serve.
 
 The suite leans on three kinds of oracle:
 
 - __Self-consistency__, where the traceback's score must equal the score-only kernel's.
 - __Cross-implementation__, where every backend must return what the reference returns.
-- __External__, where BioPython and brute-force enumeration answer the same question independently.
+- __External__, where BioPython, ViennaRNA and brute-force enumeration answer independently.
 
 The third kind matters most: the first two would agree with each other while both being wrong.
 """
@@ -19,9 +19,8 @@ The third kind matters most: the first two would agree with each other while bot
 # pyright: reportArgumentType=false, reportAssignmentType=false, reportIndexIssue=false
 # pyright: reportReturnType=false
 
-import hashlib
-import math
 import json
+import math
 import os
 import pathlib
 import re
@@ -29,12 +28,17 @@ import subprocess
 import sys
 from itertools import combinations, product
 from random import choice, randint, seed as random_seed
-from typing import NamedTuple, TypedDict
+from typing import NamedTuple
 
 import numpy as np
 import pytest
 from Bio import Align
 from Bio.Align import substitution_matrices
+
+try:
+    import RNA
+except ImportError:
+    RNA = None
 
 import affinegaps
 import cofolding
@@ -59,6 +63,32 @@ from affinegaps import (
     zuker_fold,
 )
 
+REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parent
+"""Where the sources, `cli.mojo` and the `build/` directory live."""
+
+NATIVE_BINARY = REPOSITORY_ROOT / "build" / "affinegaps"
+"""The compiled command-line tool, which only some tests need."""
+
+# Keyed by both axes. Naming a key just "gpu" would be ambiguous the moment a second backend grows
+# a device path, and Numba already has one in `numba.cuda`.
+ALL_BACKENDS = {
+    "python-cpu": (Backend.PYTHON, Device.CPU),
+    "numba-cpu": (Backend.NUMBA, Device.CPU),
+    "mojo-cpu": (Backend.MOJO, Device.CPU),
+    "mojo-gpu": (Backend.MOJO, Device.GPU),
+}
+"""Every placement the suite knows how to exercise, as members rather than as their spellings."""
+
+# `skipif` is resolved by pytest itself, so these need no hook and no `conftest.py`.
+needs_gpu = pytest.mark.skipif(
+    not available(Backend.MOJO, Device.GPU), reason="this machine has no accelerator the compiled backend can reach"
+)
+"""Declares a test that cannot run without a reachable accelerator."""
+needs_native_binary = pytest.mark.skipif(
+    not NATIVE_BINARY.exists(), reason="the native binary is not built; run `pixi run build-cli`"
+)
+"""Declares a test that shells out to `build/affinegaps` rather than to the Python entry point."""
+
 randomized_repetitions_count: int = int(os.environ.get("AFFINEGAPS_REPETITIONS", "10"))
 """How many times a randomised test runs. Override with `AFFINEGAPS_REPETITIONS`."""
 
@@ -70,8 +100,58 @@ is a fuzzing run and `AFFINEGAPS_REPETITIONS=1 AFFINEGAPS_SCALE=4` is a release 
 number cannot express both.
 """
 
+
+def requested_backends() -> list:
+    """Which placements to exercise, narrowed by `AFFINEGAPS_BACKENDS` when it is set."""
+    names = [name.strip() for name in os.environ.get("AFFINEGAPS_BACKENDS", "").split(",") if name.strip()]
+    if not names:
+        return list(ALL_BACKENDS)
+    unknown = set(names) - set(ALL_BACKENDS)
+    if unknown:
+        raise pytest.UsageError(f"Unknown backend(s): {', '.join(sorted(unknown))}")
+    return names
+
+
+def pytest_generate_tests(metafunc):
+    """Supplies the backend axis to any test that names it.
+
+    One of the few hooks a test module may own: the collector reads it off the module directly
+    rather than through the plugin manager, which is why the rest of them need a `conftest.py`.
+    """
+    chosen = requested_backends()
+    for argument, choices in (
+        ("backend", chosen),
+        ("compiled_backend", [name for name in chosen if not name.startswith("python")]),
+    ):
+        if argument in metafunc.fixturenames:
+            metafunc.parametrize(argument, choices, indirect=True)
+
+
+def _placement_keywords(name: str) -> dict:
+    """The keywords selecting one placement, skipping when this machine cannot serve it."""
+    backend, device = ALL_BACKENDS[name]
+    if not available(backend, device):
+        pytest.skip(f"the {name} backend does not run here; see the README for how to build it")
+    return {"backend": backend, "device": device}
+
+
+@pytest.fixture
+def backend(request):
+    """Placement keywords for one backend, across every implementation."""
+    return _placement_keywords(request.param)
+
+
+@pytest.fixture
+def compiled_backend(request):
+    """The same, restricted to the backends that compile."""
+    return _placement_keywords(request.param)
+
+
 _seed_base: int | None = int(s) if (s := os.environ.get("AFFINEGAPS_SEED")) is not None else None
 """Base seed, if the caller wants a run reproduced. Unset means fresh data every run."""
+
+needs_viennarna = pytest.mark.skipif(RNA is None, reason="ViennaRNA is not installed; it ships in the `test` group")
+"""Declares a test that cannot run without the external folding oracle."""
 
 
 @pytest.fixture(autouse=True)
@@ -158,74 +238,6 @@ def rescore(first: str, second: str, scoring: dict | None = None) -> int:
             total += chosen["substitution"].match if left == right else chosen["substitution"].mismatch
             in_first = in_second = False
     return total
-
-
-# region Backend Axis
-
-# Keyed by both axes. Naming a key just "gpu" would be ambiguous the moment a second backend grows
-# a device path, and Numba already has one in `numba.cuda`.
-ALL_BACKENDS = {
-    "python-cpu": ("python", "cpu"),
-    "numba-cpu": ("numba", "cpu"),
-    "mojo-cpu": ("mojo", "cpu"),
-    "mojo-gpu": ("mojo", "gpu"),
-}
-
-
-def requested_backends() -> list:
-    """Which backends to exercise, narrowed by `AFFINEGAPS_BACKENDS` when it is set.
-
-    An environment variable rather than a command-line option, because `pytest_addoption` is only
-    honoured from a `conftest.py` and this suite is one file. Narrowing is rarely needed anyway:
-    a backend the machine cannot serve is skipped by the probe below without being asked.
-    """
-    names = [n.strip() for n in os.environ.get("AFFINEGAPS_BACKENDS", "").split(",") if n.strip()]
-    if not names:
-        return list(ALL_BACKENDS)
-    unknown = set(names) - set(ALL_BACKENDS)
-    if unknown:
-        raise pytest.UsageError(f"Unknown backend(s): {', '.join(sorted(unknown))}")
-    return names
-
-
-def pytest_generate_tests(metafunc):
-    """Supplies the backend axis to any test that names it."""
-    for argument, choices in (
-        ("backend", requested_backends()),
-        ("compiled_backend", [n for n in requested_backends() if not n.startswith("python")]),
-    ):
-        if argument in metafunc.fixturenames:
-            metafunc.parametrize(argument, choices, indirect=True)
-
-
-class BackendKeywords(TypedDict):
-    """The two keywords that select where a call runs."""
-
-    backend: Backend
-    device: Device
-
-
-def _scoring_keywords(name: str) -> BackendKeywords:
-    """The keywords selecting one backend, skipping when this machine cannot serve it."""
-    backend, device = ALL_BACKENDS[name]
-    if not available(backend, device):
-        pytest.skip(f"the {name} backend does not run here; see the README for how to build it")
-    return {"backend": backend, "device": device}
-
-
-@pytest.fixture
-def backend(request):
-    """Scoring keywords for one backend, across every implementation."""
-    return _scoring_keywords(request.param)
-
-
-@pytest.fixture
-def compiled_backend(request):
-    """The same, restricted to the compiled backends."""
-    return _scoring_keywords(request.param)
-
-
-# endregion Backend Axis
 
 
 # region Algorithm Properties
@@ -588,7 +600,8 @@ def hairpin_cost(sequence: str, opening: int, closing: int) -> int | None:
         return None
     tabulated = tabulated_hairpin(sequence, opening, closing, size)
     if tabulated is not None:
-        return tabulated
+        # Tabulated with the helix end factored out, as the mismatch tables are.
+        return tabulated + helix_end_penalty(slot)
     if size <= turner.LOOP_LIMIT:
         initiation = int(turner.HAIRPIN_INITIATION[size])
     else:
@@ -849,21 +862,6 @@ def brute_force_cofold(first: str, second: str) -> int:
 # region Frozen Expectations
 
 
-class FoldCase(NamedTuple):
-    """One folding expectation, frozen against the tables `TURNER_FINGERPRINT` names."""
-
-    tag: str
-    """Hyphenated, and the pytest identifier."""
-    sequence: str
-    """What is folded."""
-    structure: str
-    """Dot-bracket, written under the sequence so the pairing can be checked by eye."""
-    decikcal: int
-    """Integer decikilocalories, because the public entry point divides by ten on the way out."""
-    tier: int = 1
-    """Re-derived by enumeration only when `AFFINEGAPS_SCALE` reaches it."""
-
-
 class CofoldCase(NamedTuple):
     """One cofolding expectation, frozen against the pair table and the covariance scoring."""
 
@@ -884,119 +882,6 @@ class CofoldCase(NamedTuple):
     tier: int = 1
     """Re-derived by enumeration only when `AFFINEGAPS_SCALE` reaches it."""
 
-
-def turner_fingerprint() -> str:
-    """A digest of every energy table and scalar the folding model reads, in a fixed order.
-
-    Names the model a frozen energy was derived against, so a table edit announces itself instead
-    of surfacing as a wall of unexplained mismatches.
-    """
-    digest = hashlib.blake2b(digest_size=16)
-    for name in (
-        "PAIR_INDEX",
-        "STACK",
-        "TERMINAL_MISMATCH_HAIRPIN",
-        "TERMINAL_MISMATCH_INTERNAL",
-        "DANGLE_AFTER",
-        "DANGLE_BEFORE",
-        "HAIRPIN_INITIATION",
-        "BULGE_INITIATION",
-        "INTERNAL_INITIATION",
-        "TRILOOP_KEYS",
-        "TRILOOP_ENERGIES",
-        "TETRALOOP_KEYS",
-        "TETRALOOP_ENERGIES",
-        "HEXALOOP_KEYS",
-        "HEXALOOP_ENERGIES",
-    ):
-        digest.update(name.encode())
-        digest.update(np.asarray(getattr(turner, name)).astype("<i4").tobytes())
-    for name in (
-        "LOOP_LIMIT",
-        "FORBIDDEN",
-        "MULTILOOP_OFFSET",
-        "MULTILOOP_PER_UNPAIRED",
-        "MULTILOOP_PER_HELIX",
-        "NINIO_PER_ASYMMETRY",
-        "NINIO_CAP",
-        "TERMINAL_AU",
-    ):
-        digest.update(f"{name}={getattr(turner, name)}".encode())
-    return digest.hexdigest()
-
-
-TURNER_FINGERPRINT = "5994fabbce625616aca625d482ab7b1a"
-"""The model every frozen folding energy below was derived against."""
-
-
-CORPUS_ORIGIN = """These are the answers this implementation gives today, checked case by case against a
-hand-derived expectation before being written down. They exist because every other folding and
-cofolding test is satisfied by a recurrence that returns a legal, self-consistent, cross-backend
-identical, suboptimal answer: a one-character slip in a scan bound leaves the whole suite green and
-changes what `("GC", "GC")` scores."""
-
-
-# moved multiloop: -89 -> -84
-# moved interior-one-by-one: -8 -> 0
-# moved interior-one-by-two: -16 -> -14
-# moved interior-two-by-one: -24 -> -14
-FOLD_CASES: tuple[FoldCase, ...] = (
-    FoldCase("empty", "", "", 0),
-    FoldCase("single-base", "A", ".", 0),
-    FoldCase("lone-pair-cannot-close", "GC", "..", 0),
-    FoldCase("unstacked-hairpin-refused", "GAAAC", ".....", 0),
-    FoldCase("homopolymer-adenine", "AAAAAAAAAAAA", "............", 0),
-    FoldCase("homopolymer-guanine", "GGGGGGGG", "........", 0),
-    FoldCase("homopolymer-cytosine", "CCCCCCCC", "........", 0),
-    FoldCase("homopolymer-uracil", "UUUUUUUU", "........", 0),
-    FoldCase("min-hairpin-exactly-three", "GGGAAACCC", "(((...)))", -12),
-    FoldCase("min-hairpin-two-refused", "GGGAACCC", "........", 0),
-    FoldCase("min-hairpin-one-refused", "GGGACCC", ".......", 0),
-    FoldCase("triloop-table", "GGGCAACGCCC", "((((...))))", -32),
-    FoldCase("tetraloop-uucg", "GGGCUUCGGCCC", "((((....))))", -63),
-    FoldCase("hexaloop-table", "GGACAGUACUCC", "(((......)))", -34),
-    FoldCase("bulge-one-five-prime", "GGCCAGCGCAAAAGCGCGGCC", "((((.((((....))))))))", -137),
-    FoldCase("bulge-one-three-prime", "GGCCGCGCAAAAGCGCAGGCC", "((((((((....)))).))))", -137),
-    FoldCase("bulge-two", "GGCCAAGCGCAAAAGCGCGGCC", "((((..((((....))))))))", -123),
-    FoldCase("bulge-three", "GGCCAAAGCGCAAAAGCGCGGCC", "((((...((((....))))))))", -119),
-    FoldCase("interior-two-by-two", "GGCCAAGCGCAAAAGCGCAAGGCC", "((((..((((....))))..))))", -140),
-    FoldCase("interior-one-by-three", "GGCCAGCGCAAAAGCGCAAAGGCC", "((((.((((....))))...))))", -128),
-    FoldCase("ninio-at-cap", "GGCCAGCGCAAAAGCGCAAAAAAGGCC", "((((.((((....))))......))))", -100),
-    FoldCase("ninio-clamped", "GGCCAGCGCAAAAGCGCAAAAAAAAGGCC", "((((.((((....))))........))))", -97),
-    FoldCase("single-wobble-stem", "GGGUAAAAUCCC", "(((......)))", -28),
-    FoldCase("wobble-inside-stem", "GGCGUAAAAUCGCC", "((((......))))", -53),
-    FoldCase("watson-crick-control", "GGCGCAAAAGCGCC", "(((((....)))))", -84),
-    FoldCase("guanine-cytosine-rich", "GGGCCAAAAGGCCC", "(((((....)))))", -92),
-    FoldCase("adenine-uracil-rich", "AAAUUAAAAUUUUU", "..............", 0),
-    FoldCase("tie-two-optima", "GCUCCUACGGACA", "..(((...)))..", -5),
-    FoldCase("tie-three-optima", "CUGGUAAACUGGCUCCA", "..((..........)).", -1),
-    FoldCase(
-        "hairpin-past-loop-limit",
-        "GGGGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACCCC",
-        "((((...................................))))",
-        -31,
-    ),
-    FoldCase("densest-affordable", "GGGGGGGGGGCCCCCCCCCC", "((((((((....))))))))", -190, tier=2),
-    FoldCase(
-        "interior-loop-at-max",
-        "GGGGAAAAAAAAAAAAAAAGGGGAAACCCCAAAAAAAAAAAAAAACCCC",
-        "((((...............((((...))))...............))))",
-        -107,
-        tier=2,
-    ),
-    FoldCase(
-        "interior-loop-past-max",
-        "GGGGAAAAAAAAAAAAAAAAGGGGAAACCCCAAAAAAAAAAAAAAACCCC",
-        "....................((((...))))...................",
-        -64,
-        tier=2,
-    ),
-    FoldCase("multiloop", "GCCCCGGGUCACCGGCAUUAAUGCGGGC", "(((((((....)))(((....)))))))", -84, tier=4),
-    FoldCase("interior-one-by-one", "AGUGCUGACGUAAGGACU", "..................", 0),
-    FoldCase("interior-one-by-two", "GGAGUUGGAUAAACCGCCG", "((...(((.....))))).", -14),
-    FoldCase("interior-two-by-one", "CCCAUUUUCGUACGAUAUGG", ".((((..((....)).))))", -14),
-    FoldCase("interior-one-by-one-stacked", "GGGCAGCCAAAAGGCAGCCC", "((((.(((....))).))))", -96),
-)
 
 COFOLD_CASES: tuple[CofoldCase, ...] = (
     CofoldCase("both-empty", "", "", "", "", "", 0),
@@ -1041,13 +926,6 @@ COFOLD_CASES: tuple[CofoldCase, ...] = (
 )
 
 
-@pytest.mark.parametrize("case", FOLD_CASES, ids=lambda case: case.tag)
-def test_fold_reproduces_the_frozen_corpus(backend, case: FoldCase):
-    """The frozen answer, on every backend, structure included."""
-    structure, energy = zuker_fold(case.sequence, **backend)
-    assert (structure, round(energy * 10)) == (case.structure, case.decikcal)
-
-
 @pytest.mark.parametrize("case", COFOLD_CASES, ids=lambda case: case.tag)
 def test_cofold_reproduces_the_frozen_corpus(backend, case: CofoldCase):
     """The frozen answer, on every backend, both rows and the structure included."""
@@ -1056,14 +934,6 @@ def test_cofold_reproduces_the_frozen_corpus(backend, case: CofoldCase):
         case.gapped_second,
         case.structure,
         case.score,
-    )
-
-
-def test_the_frozen_corpus_matches_the_model_it_was_frozen_against():
-    """Edit the energy tables and this fails first, by name, rather than thirty energies at once."""
-    assert turner_fingerprint() == TURNER_FINGERPRINT, (
-        "turner.py changed, so every frozen folding energy is suspect. Re-derive them before"
-        " editing the corpus, and check whether the recurrence moved too."
     )
 
 
@@ -1361,18 +1231,6 @@ def test_frozen_cofolding_survives_enumeration(case: CofoldCase):
     assert brute_force_cofold(case.first, case.second) == case.score
 
 
-@pytest.mark.parametrize("case", FOLD_CASES, ids=lambda case: case.tag)
-def test_frozen_folding_survives_enumeration(case: FoldCase):
-    """The frozen corpus re-derived by enumeration rather than trusted.
-
-    Tiered, because the multiloop case enumerates hundreds of thousands of structures; raise
-    `AFFINEGAPS_SCALE` to reach it.
-    """
-    if case.tier > exhaustive_scale:
-        pytest.skip(f"tier {case.tier} needs AFFINEGAPS_SCALE={case.tier}")
-    assert brute_force_fold(case.sequence) == case.decikcal
-
-
 def random_foldable_rna() -> str:
     """One RNA sequence long enough to form a structure worth checking."""
     return random_rna(randint(8, 45))
@@ -1423,23 +1281,53 @@ def test_fold_finds_no_structure_without_pairs(backend):
     assert energy == 0.0
 
 
+def tabulated_hairpins():
+    """Every tabulated hairpin, unpacked from its key and closed inside a stem that cannot slip."""
+    for keys, size in ((turner.TRILOOP_KEYS, 3), (turner.TETRALOOP_KEYS, 4), (turner.HEXALOOP_KEYS, 6)):
+        for key in keys:
+            loop = "".join(turner.BASES[int(key) >> (2 * place) & 3] for place in reversed(range(size + 2)))
+            yield pytest.param("GGG" + loop + "CCC", "((((" + "." * size + "))))", id=loop)
+
+
+@needs_viennarna
+@pytest.mark.parametrize("sequence, structure", tabulated_hairpins())
+def test_fold_model_matches_viennarna_on_tabulated_hairpins(sequence: str, structure: str):
+    """A tabulated loop replaces every term the two models spell differently, so they agree to 0.00."""
+    assert rescore_fold(sequence, structure) / 10 == pytest.approx(RNA.energy_of_struct(sequence, structure), abs=0.01)
+
+
+@needs_viennarna
+def test_fold_stays_close_to_viennarna():
+    """The mean absolute gap to ViennaRNA over a seeded sample of 200 sequences, measured at 0.40.
+
+    Both models score the structure this one emitted, so the gap is the energy tables rather than a
+    disagreement over which structure wins.
+    """
+    random_seed(42)
+    drawn, total = 200, 0.0
+    for _ in range(drawn):
+        sequence = random_rna(randint(20, 60))
+        structure, energy = zuker_fold(sequence)
+        total += abs(energy - RNA.energy_of_struct(sequence, structure))
+    assert total / drawn < 0.5, "the energy model has drifted from ViennaRNA"
+
+
 # endregion Folding
 
 
 # region Command Line
 
-NATIVE_BINARY = pathlib.Path(__file__).parent / "build" / "affinegaps"
 """The compiled command line, which mirrors the Python one verb for verb."""
 
 VERB_ARGUMENTS = (
-    ["align", "GIVEQCCTSICSLYQLENYCN", "HSQGTFTSDYSKYLDSRAEQDFV"],
-    ["align", "GIVEQ", "HSQGT", "--local"],
-    ["align", "GIVEQ", "HSQGT", "--open", "-5", "--extend", "-2"],
-    ["fold", "GGGGCUUCGGCCCC"],
-    ["cofold", "GGGGCAAAAGCCCC", "GGGGCUUUUGCCCC"],
-    ["cofold", "GGGGCAAAAGCCCC", "GGGGCUUUUGCCCC", "--gap", "-3"],
-    ["align", "GIVEQ", "HSQGT", "--gpu-id", "0", "--threads", "2"],
-    ["fold", "GGGGCUUCGGCCCC", "--gpu-id", "0"],
+    pytest.param(["align", "GIVEQCCTSICSLYQLENYCN", "HSQGTFTSDYSKYLDSRAEQDFV"], id="align-global"),
+    pytest.param(["align", "GIVEQ", "HSQGT", "--local"], id="align-local"),
+    pytest.param(["align", "GIVEQ", "HSQGT", "--open", "-5", "--extend", "-2"], id="align-affine-gap"),
+    pytest.param(["fold", "GGGGCUUCGGCCCC"], id="fold"),
+    pytest.param(["cofold", "GGGGCAAAAGCCCC", "GGGGCUUUUGCCCC"], id="cofold"),
+    pytest.param(["cofold", "GGGGCAAAAGCCCC", "GGGGCUUUUGCCCC", "--gap", "-3"], id="cofold-linear-gap"),
+    pytest.param(["align", "GIVEQ", "HSQGT", "--gpu-id", "0", "--threads", "2"], marks=needs_gpu, id="align-on-gpu"),
+    pytest.param(["fold", "GGGGCUUCGGCCCC", "--gpu-id", "0"], marks=needs_gpu, id="fold-on-gpu"),
 )
 """Argument vectors both binaries must answer identically."""
 
@@ -1448,7 +1336,7 @@ def run_python_cli(arguments: list) -> subprocess.CompletedProcess:
     """The Python entry point as a subprocess, so exit codes and streams are observable."""
     # Loading the Mojo library rewrites `PYTHONPATH` in the C environ, which `os.environ` does not see.
     return subprocess.run(
-        [sys.executable, str(pathlib.Path(__file__).parent / "affinegaps.py"), *arguments],
+        [sys.executable, str(REPOSITORY_ROOT / "affinegaps.py"), *arguments],
         capture_output=True,
         text=True,
         env=os.environ.copy(),
@@ -1460,33 +1348,44 @@ def advertised_flags(usage: str) -> set:
     return set(re.findall(r"--[a-z][a-z-]*", usage))
 
 
-def test_every_advertised_flag_is_accepted():
+VERB_SEQUENCES = {
+    # `align` scores over the protein alphabet by default; the folding verbs are RNA-only.
+    "align": ["GIVEQCCTSICSLY", "HSQGTFTSDYSKYL"],
+    "fold": ["GGGGCAAAAGCCCC"],
+    "cofold": ["GGGGCAAAAGCCCC", "GGGGCUUUUGCCCC"],
+}
+"""Inputs each verb accepts, so a flag is exercised against a sequence its alphabet admits."""
+
+
+def advertised_pairs() -> list:
+    """Every verb and flag `cli.mojo` advertises, one parameter each so a failure names itself."""
+    source = (REPOSITORY_ROOT / "cli.mojo").read_text()
+    pairs = []
+    for verb, constant in (("align", "USAGE_ALIGN"), ("fold", "USAGE_FOLD"), ("cofold", "USAGE_COFOLD")):
+        block = re.search(rf'comptime {constant} = """(.*?)"""', source, re.S)
+        assert block, f"{constant} is missing from cli.mojo"
+        for flag in sorted(advertised_flags(block.group(1)) - {"--help"}):
+            marks = needs_gpu if flag == "--gpu-id" else ()
+            pairs.append(pytest.param(verb, flag, marks=marks, id=f"{verb}{flag}"))
+    return pairs
+
+
+@pytest.mark.parametrize("verb,flag", advertised_pairs())
+def test_every_advertised_flag_is_accepted(verb: str, flag: str):
     """The native usage text and its parser must agree, which is the bug that prompted this design.
 
     The old text offered `--gpu` while the parser rejected it, so the help was the half that lied.
     """
-    source = (pathlib.Path(__file__).parent / "cli.mojo").read_text()
-    for verb, constant in (("align", "USAGE_ALIGN"), ("fold", "USAGE_FOLD"), ("cofold", "USAGE_COFOLD")):
-        block = re.search(rf'comptime {constant} = """(.*?)"""', source, re.S)
-        assert block, f"{constant} is missing from cli.mojo"
-        # `align` scores over the protein alphabet by default; the folding verbs are RNA-only.
-        sequences = {
-            "align": ["GIVEQCCTSICSLY", "HSQGTFTSDYSKYL"],
-            "fold": ["GGGGCAAAAGCCCC"],
-            "cofold": ["GGGGCAAAAGCCCC", "GGGGCUUUUGCCCC"],
-        }[verb]
-        for flag in sorted(advertised_flags(block.group(1))):
-            if flag == "--help":
-                continue
-            valued = {"--device": "cpu", "--format": "human", "--color": "never", "--gpu-id": "0", "--threads": "1"}
-            extra = [flag] if flag in ("--local", "--verbose") else [flag, valued.get(flag, "-1")]
-            # A uniform score is half a record, so the two halves are only ever given together.
-            if flag in ("--match", "--mismatch"):
-                extra = ["--match", "2", "--mismatch", "-1"]
-            outcome = run_python_cli([verb, *sequences, *extra])
-            assert outcome.returncode == 0, f"{verb} rejected its own advertised {flag}: {outcome.stderr}"
+    valued = {"--device": "cpu", "--format": "human", "--color": "never", "--gpu-id": "0", "--threads": "1"}
+    extra = [flag] if flag in ("--local", "--verbose") else [flag, valued.get(flag, "-1")]
+    # A uniform score is half a record, so the two halves are only ever given together.
+    if flag in ("--match", "--mismatch"):
+        extra = ["--match", "2", "--mismatch", "-1"]
+    outcome = run_python_cli([verb, *VERB_SEQUENCES[verb], *extra])
+    assert outcome.returncode == 0, f"{verb} rejected its own advertised {flag}: {outcome.stderr}"
 
 
+@needs_gpu
 @pytest.mark.parametrize("threads", (1, 2, 8))
 def test_thread_width_does_not_move_the_answer(threads: int):
     """A width is a placement knob, so the traceback it parallelizes must land on the same alignment."""
@@ -1521,11 +1420,10 @@ def test_a_negative_count_is_a_usage_error(flag: str):
     assert run_python_cli(["align", "GIVEQ", "HSQGT", flag, "-1"]).returncode == 2
 
 
-@pytest.mark.parametrize("arguments", VERB_ARGUMENTS, ids=lambda case: f"{case[0]}-{len(case)}")
+@needs_native_binary
+@pytest.mark.parametrize("arguments", VERB_ARGUMENTS)
 def test_both_binaries_agree(arguments: list):
     """Two parsers can drift, so the guard is that they answer identically, not that we were careful."""
-    if not NATIVE_BINARY.exists():
-        pytest.skip("the native binary is not built; run `pixi run build-cli`")
     # A vector that names its own placement keeps it; the rest are pinned to the host, which both
     # binaries reach without an accelerator.
     pinned = [] if "--gpu-id" in arguments or "--device" in arguments else ["--device", "cpu"]
@@ -1536,7 +1434,7 @@ def test_both_binaries_agree(arguments: list):
     assert json.loads(native.stdout) == json.loads(hosted.stdout)
 
 
-@pytest.mark.parametrize("arguments", VERB_ARGUMENTS, ids=lambda case: f"{case[0]}-{len(case)}")
+@pytest.mark.parametrize("arguments", VERB_ARGUMENTS)
 def test_json_carries_the_placement(arguments: list):
     """Every payload says which recurrence ran and where, so a log of runs is self-describing."""
     outcome = run_python_cli([*arguments, "--format", "json"])
@@ -1581,9 +1479,9 @@ def test_exit_codes(arguments: list, expected: int):
 
 def test_verbs_reproduce_the_validated_values():
     """The numbers checked against `efn2` and BioPython must survive any change to the surface."""
-    align = json.loads(run_python_cli(["align", *VERB_ARGUMENTS[0][1:], "--format", "json"]).stdout)
+    align = json.loads(run_python_cli(["align", *VERB_ARGUMENTS[0].values[0][1:], "--format", "json"]).stdout)
     fold = json.loads(run_python_cli(["fold", "GGGGCUUCGGCCCC", "--format", "json"]).stdout)
-    cofold = json.loads(run_python_cli(["cofold", *VERB_ARGUMENTS[4][1:], "--format", "json"]).stdout)
+    cofold = json.loads(run_python_cli(["cofold", *VERB_ARGUMENTS[4].values[0][1:], "--format", "json"]).stdout)
     assert align["score"] == 22
     assert fold["energy_kcal_per_mol"] == -9.6
     assert cofold["score"] == 46

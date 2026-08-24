@@ -50,11 +50,11 @@ During my exploration of existing implementations, I've noticed several bugs:
 ## Benchmarks
 
 Throughput first, against the same kernels on one CPU core, with third-party tools where one implements the same recurrence.
-Every cell is __wall time · cell-update rate__, where a cell update is one evaluation of the innermost recurrence rather than one entry of the table.
+Every cell is __wall time · cell-update rate__, where the count depends only on the sequence lengths, so every row in a column is rated against the same work.
 
-A dash is a run that did not finish inside five minutes or whose table exceeded a 24 GiB budget.
+A dash is a run abandoned as too slow or too large to be worth the machine time.
 Lengths climb by four where time is quadratic, by two where cubic and by half where sextic, so every ladder spans a comparable range of wall clock.
-Best of three below 4096 and a single run above; third-party rows are command-line invocations, so their sub-100 ms cells are mostly process startup.
+Best of three; third-party rows are command-line invocations, so their sub-100 ms cells are mostly process startup.
 
 ### Protein Alignment Speed
 
@@ -104,7 +104,7 @@ An XIST lncRNA runs about 19 Knt, a SARS-CoV-2 genome is 29,903 bases, and the l
 ### RNA Cofolding Speed
 
 The wide columns are where the accuracy corpus sits.
-ArchiveII's tmRNA and RNase P medians are 363 and 330 bases and its ninetieth percentile is 419, so 384 puts most of that corpus inside the exact sweep.
+Most ArchiveII tmRNA and RNase P sequences run under 400 bases, so the 384 column reaches most of that corpus.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/cofolding-dark.svg">
@@ -162,7 +162,7 @@ A four-megabase pair reconstructs inside a gigabyte of device memory, and doubli
 
 Accuracy is reported on __ArchiveII__, the Mathews lab set of 3,975 known structures across ten families that is the standard benchmark for thermodynamic folders.
 It plays the role here that BLOSUM62 and BioPython play on the protein side: an external reference this project is measured against rather than tuned on.
-The set is not vendored; `bench.py` reads it from `data/archive-ii`, admitting a family's own index, capping length at 400 bases and drawing 120 per family under a recorded seed.
+The set is not vendored; `bench.py` reads it from `data/archive-ii`.
 
 Every predicted pair is checked against the structure that was actually measured for that molecule, so both columns are contestants and neither one is the answer key.
 F1 runs from zero to one and rewards finding real pairs while punishing invented ones, so no folder can win by guessing generously.
@@ -177,9 +177,12 @@ The last column subtracts the two scores sequence by sequence and averages, so a
 | tmRNA          | rescues stalled ribosomes |       120 |         0.452 |           0.452 | +0.000 ± 0.011 |
 | Group I intron |        splices itself out |        38 |         0.530 |           0.506 | +0.024 ± 0.020 |
 
-__Only tRNA differs by more than twice its uncertainty__, and that difference is coaxial stacking, which `Fold` prices and this model does not.
-On the other five the reduced model matches or beats the complete one.
-`Fold`'s own numbers sit where the literature puts the Turner model, so the comparison is calibrated rather than flattering.
+> Drawn from each family's own index, capped at 400 bases, 120 sequences per family where the family has them.
+> Another draw moves every number, so read the gap between the two columns rather than either one alone.
+
+__Only tRNA differs by more than twice its uncertainty.__
+Both columns are scored without coaxial stacking, since `bench.py` passes `--disablecoax` so the two price the same terms.
+That makes this a comparison of the shared model rather than of `Fold` at full strength, and on the other five families the two agree within noise.
 
 ## Quickstart
 
@@ -220,7 +223,7 @@ Unspecified adapts; specified is honoured or refused.
 Asking for a backend that is not built raises rather than quietly running something else, so a measurement can never report the GPU while timing the reference.
 
 There is no knob for how the traceback stores its state.
-Below a size threshold it keeps a decision per cell, above it recurses in linear space, and the two produce identical output — so the choice is cost, never correctness.
+Below a size threshold it keeps a decision per cell, above it recurses in linear space, and both return an optimal answer — so the choice is cost, never correctness.
 
 ### Aligning Two Sequences
 
@@ -433,7 +436,7 @@ Three groups, one per module, each naming what the tool does and where this diff
 ### Folding
 
 - [RNAstructure](https://rna.urmc.rochester.edu/RNAstructure.html) — the Mathews lab suite whose `Fold` program implements the complete Turner model, including the coaxial stacking and the special internal-loop tables omitted here.
-  It is the contestant in the accuracy table above.
+  It is the contestant in the accuracy table above, run there with coaxial stacking disabled so both columns price the same terms.
 - [ViennaRNA](https://www.tbi.univie.ac.at/RNA/) — `RNAfold` and a partition function over the same thermodynamic model, so it answers how probable a pairing is rather than only which structure is optimal.
 - [LinearFold](https://github.com/LinearFold/LinearFold) — beam search in linear time, trading exactness for a sweep that scales to whole messenger RNAs.
 

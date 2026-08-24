@@ -49,6 +49,7 @@ biopython = "*"
 pytest = "*"
 pytest-repeat = "*"
 stringzilla = "*"
+viennarna = "*"
 
 # One environment holding every feature: a backend left out of it is a backend whose tests skip
 # without failing, which is how NumBa went unexercised.

@@ -196,6 +196,8 @@ def available(backend: Backend = Backend.MOJO, device: Device = Device.CPU) -> b
     This executes a tiny alignment rather than inferring from an import, because a built extension
     on a machine with an unsupported driver imports cleanly and then fails at every device call.
     """
+    # Coerced at the boundary, as `_resolve` does: a `StrEnum` equals its string but is not it.
+    backend, device = Backend(backend), Device(device)
     if backend is Backend.PYTHON:
         return device is Device.CPU
     if backend is Backend.NUMBA:

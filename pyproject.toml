@@ -57,7 +57,8 @@ numba = ["numba"]
 # A group rather than an extra, so the checkers stay out of the published wheel's metadata.
 [dependency-groups]
 lint = ["ruff>=0.15", "black>=26", "mypy>=2", "pyright>=1.1", "numpy"]
-test = ["biopython", "stringzilla", "pytest", "pytest-repeat"]
+# `colorama` is an extra at runtime, but the colour path cannot be tested without it.
+test = ["biopython", "colorama", "pytest", "pytest-repeat", "stringzilla", "viennarna"]
 
 [tool.pytest.ini_options]
 addopts = "-q" # no -x: with a backend axis, every backend's failure matters

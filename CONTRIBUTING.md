@@ -15,7 +15,7 @@ Alternatively, consider using `uv`:
 uv venv --python 3.12           # Or your preferred Python version
 source .venv/bin/activate       # To activate the virtual environment
 uv pip install --group test .   # To install the package and its test dependencies
-uv run pytest test.py           # To run the tests
+uv run pytest test.py            # To run the tests
 ```
 
 ## House Style
@@ -50,12 +50,12 @@ The Mojo kernels and the Python reference are held to the same recurrence, the s
 
 Four environment variables shape a run, and the first two are deliberately separate: one is breadth, the other is depth.
 
-| Variable                 | Default  | Meaning                                                                                |
-| :----------------------- | :------- | :------------------------------------------------------------------------------------- |
-| `AFFINEGAPS_REPETITIONS` | `10`     | Random draws per randomized test                                                       |
-| `AFFINEGAPS_SCALE`       | `1`      | Multiplier on every exhaustive oracle's budget, and the highest frozen tier re-derived |
-| `AFFINEGAPS_SEED`        | unset    | Fixes the draws so a failure reproduces                                                |
-| `AFFINEGAPS_BACKENDS`    | all four | Narrows the backend axis                                                               |
+| Variable                 | Default  | Meaning                                                    |
+| :----------------------- | :------- | :--------------------------------------------------------- |
+| `AFFINEGAPS_REPETITIONS` | `10`     | Random draws per randomized test                           |
+| `AFFINEGAPS_SCALE`       | `1`      | Multiplier on every exhaustive oracle's budget             |
+| `AFFINEGAPS_SEED`        | unset    | Fixes the draws so a failure reproduces                    |
+| `AFFINEGAPS_BACKENDS`    | all four | Narrows the backend axis                                   |
 
 `AFFINEGAPS_REPETITIONS=100 AFFINEGAPS_SCALE=1` is a fuzzing run and `AFFINEGAPS_REPETITIONS=1 AFFINEGAPS_SCALE=4` is a release gate, which is why one number cannot express both.
 
@@ -79,13 +79,15 @@ Every recurrence is checked against enumerating the whole answer space, sharing 
 
 This is the only kind of oracle that can catch a recurrence which is self-consistently wrong on every backend at once, which is exactly what rewriting a recurrence risks.
 
-### The Frozen Corpus
+### The Energy Model
 
-`FOLD_CASES` and `COFOLD_CASES` hold answers checked case by case before being written down: the minimum-hairpin boundary, all three special-loop tables, the bulge and interior ladder including both ends of Ninio's cap, a single wobble against a Watson-Crick control, energy ties, a multiloop, and the `MAX_LOOP` boundary on both sides.
-They assert on every backend and cost microseconds; `AFFINEGAPS_SCALE` decides which of them are additionally re-derived by enumeration.
+Folding is held to ViennaRNA rather than to its own past answers.
+Every tabulated triloop, tetraloop and hexaloop is priced by both models on the same structure and must agree exactly, and across a seeded sample the mean absolute difference must stay under a recorded bound.
+A frozen corpus cannot do this job: it records what the implementation said when it was written, so a genuine fix arrives looking like a regression, which is how a transposed `STACK` row and a missing helix-end penalty survived.
 
-`TURNER_FINGERPRINT` digests every energy table and scalar.
-Edit `turner.py` and that one test fails by name, instead of thirty energies failing at once with no indication why.
+`COFOLD_CASES` stays frozen because no third-party oracle is wired up for it.
+Dynalign is the closest candidate and runs unbanded in the benchmark, but it optimises Turner free energies where cofolding optimises covariance, so it bounds a different question.
+The guard here is the brute-force enumerator, which shares the pair matrix but not the algorithm.
 
 ### The Benchmark Suite
 
