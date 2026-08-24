@@ -264,12 +264,11 @@ def hairpin_energy(
         return tabulated
     var initiation = energy_model[unsafe_offset=HAIRPIN_OFFSET + min(size, LOOP_LIMIT)]
     if size > LOOP_LIMIT:
-        var ratio = Float64(size) / Float64(LOOP_LIMIT)
-        """
-        Beyond the tabulated sizes the model extrapolates by polymer theory, which needs a logarithm; capping instead
-        would make long loops artificially cheap.
-        """
-        initiation += Int32(round(10.79 * log(ratio)))
+        # Beyond the tabulated sizes the model extrapolates by polymer theory, which needs a logarithm; capping
+        # instead would make long loops artificially cheap. Metal has no `f64`, and single precision rounds to the
+        # same decikcal for every size a hairpin can reach.
+        var ratio = Float32(size) / Float32(LOOP_LIMIT)
+        initiation += Int32(round(Float32(10.79) * log(ratio)))
     if size == MIN_TURN:
         return initiation + helix_end_penalty(pair)
     var first_unpaired = Int(sequence[unsafe_offset=start + 1])
