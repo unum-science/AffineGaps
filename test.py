@@ -52,6 +52,7 @@ from affinegaps import (
     UniformSubstitutionCosts,
     available,
     default_proteins_alphabet,
+    gpu_specs,
     levenshtein_alignment,
     needleman_wunsch_gotoh_alignment,
     needleman_wunsch_gotoh_alignments,
@@ -209,6 +210,20 @@ def batch_aligner_for(mode: str):
 def scorer_for(mode: str):
     """The score-only entry point for a mode."""
     return needleman_wunsch_gotoh_score if mode == "global" else smith_waterman_gotoh_score
+
+
+def taller_than_the_band() -> int:
+    """A first-sequence length no block here can carry, so the tiled sweep is the only way to serve it.
+
+    Derived from what the card reports rather than written down, because a wider accelerator would
+    otherwise leave these tests quietly measuring the banded path they exist to bypass. Four bytes
+    per row bounds the band from above whatever the exact carry costs, and 40,000 clears every
+    accelerator this runs on when there is none to ask.
+    """
+    specs = gpu_specs()
+    if specs is None:
+        return 40_000
+    return (specs.shared_memory_per_multiprocessor - specs.reserved_memory_per_block) // 4 + 1
 
 
 def batch_scorer_for(mode: str):
@@ -518,7 +533,7 @@ def test_batch_survives_a_pair_the_batch_kernel_cannot_take(compiled_backend, mo
     the matrix is small; and a pair over the stored budget fails a different bound. Either one
     used to divert every other pair in the batch onto the slow per-pair route.
     """
-    tall = ("A" * 40_000, "ACGT" * 4)
+    tall = ("A" * taller_than_the_band(), "ACGT" * 4)
     ordinary = random_pair(20, 60)
     firsts = [tall[0], ordinary[0]]
     seconds = [tall[1], ordinary[1]]
@@ -539,7 +554,7 @@ def test_score_survives_a_pair_the_batch_kernel_cannot_take(compiled_backend, mo
     The same tall pair the alignment path carries has to reach a number here too, and the tiled
     sweep that carries it must agree with the reference rather than with the batch it left.
     """
-    tall = ("A" * 40_000, "ACGT" * 4)
+    tall = ("A" * taller_than_the_band(), "ACGT" * 4)
     ordinary = random_pair(20, 60)
     firsts = [tall[0], ordinary[0]]
     seconds = [tall[1], ordinary[1]]
@@ -554,10 +569,25 @@ def test_score_survives_a_pair_the_batch_kernel_cannot_take(compiled_backend, mo
 def test_score_takes_an_empty_side(compiled_backend, mode: str):
     """A rectangle with no interior writes no frontier, so its borders come from the costs alone."""
     scorer = scorer_for(mode)
-    for first, second in (("A" * 40_000, ""), ("", "ACGT" * 4), ("", "")):
+    for first, second in (("A" * taller_than_the_band(), ""), ("", "ACGT" * 4), ("", "")):
         assert scorer(first, second, **SCORING, **compiled_backend) == scorer(
             first, second, **SCORING, backend="python"
         )
+
+
+def test_specs_report_the_machine():
+    """The reported specs must describe a real accelerator, or say plainly there is none to ask."""
+    specs = gpu_specs()
+    if not available(Backend.MOJO, Device.GPU):
+        assert specs is None
+        return
+    assert specs is not None
+    assert specs.shared_memory_per_multiprocessor > specs.reserved_memory_per_block
+    assert specs.largest_allocation > 0
+    assert specs.streaming_multiprocessors > 0
+    # The tall pairs above are built from these, so a length that did not clear the band would
+    # leave those tests measuring the banded path rather than the fallback.
+    assert taller_than_the_band() < specs.shared_memory_per_multiprocessor
 
 
 def test_rejects_what_it_cannot_do():

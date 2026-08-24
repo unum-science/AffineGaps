@@ -11,7 +11,7 @@ from std.ffi import c_int, c_size_t, external_call
 from std.memory import stack_allocation
 from std.sys.info import CompilationTarget, num_logical_cores, size_of
 
-from max.gpu.host import DeviceBuffer, DeviceContext
+from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext
 
 from errors import AffineGapsError, ErrorKind
 
@@ -64,15 +64,15 @@ comptime NEGATIVE_INFINITY = Int32.MIN // 4
 
 
 @fieldwise_init
-struct Executor(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """Where a sweep runs."""
+struct Device(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """Which hardware serves a call."""
 
     var identifier: UInt8
-    """Which executor this names."""
-    comptime HOST = Self(0)
-    """The serial reference sweep, on the CPU."""
-    comptime DEVICE = Self(1)
-    """The parallel sweep, on the GPU."""
+    """Which device this names."""
+    comptime CPU = Self(0)
+    """The serial reference sweep."""
+    comptime GPU = Self(1)
+    """The parallel sweep, on one accelerator."""
 
 
 def hardware_threads() -> Int:
@@ -98,39 +98,80 @@ def hardware_threads() -> Int:
 
 
 struct Placement(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Where a sweep runs, and which of the machine's resources it may take.
+    """Where a call runs, and which of the machine's resources it may take.
 
-    Reached through `host` or `device` rather than field by field, because an accelerator index on a
-    run that never reaches an accelerator is a state nothing downstream can honour.
+    Reached through `on_cpu` or `on_gpu` rather than field by field, because an accelerator index on
+    a run that never reaches an accelerator is a state nothing downstream can honour.
     """
 
-    var executor: Executor
-    """Which of the two sweeps serves the call."""
+    var device: Device
+    """Which hardware serves the call."""
     var gpu_id: Int
-    """Which accelerator, always zero under `Executor.HOST`."""
+    """Which accelerator, always zero under `Device.CPU`."""
     var threads: Int
     """How many host threads a parallel region may take, always at least one."""
 
-    def __init__(out self, executor: Executor, gpu_id: Int, threads: Int):
+    def __init__(out self, device: Device, gpu_id: Int, threads: Int):
         """Normalizes rather than trusts, so a host run cannot carry an accelerator index."""
-        self.executor = executor
-        self.gpu_id = max(gpu_id, 0) if executor == Executor.DEVICE else 0
+        self.device = device
+        self.gpu_id = max(gpu_id, 0) if device == Device.GPU else 0
         self.threads = max(threads, 1)
 
     @staticmethod
-    def host(threads: Int) -> Self:
+    def on_cpu(threads: Int) -> Self:
         """The serial sweep. The width still counts, because the linear-space traceback forks."""
-        return Self(Executor.HOST, 0, threads)
+        return Self(Device.CPU, 0, threads)
 
     @staticmethod
-    def device(gpu_id: Int, threads: Int) -> Self:
+    def on_gpu(gpu_id: Int, threads: Int) -> Self:
         """One accelerator, plus the width of the host region the device path forks back to."""
-        return Self(Executor.DEVICE, gpu_id, threads)
+        return Self(Device.GPU, gpu_id, threads)
 
     @staticmethod
     def default() -> Self:
         """The host sweep across every thread this process may use."""
-        return Self.host(hardware_threads())
+        return Self.on_cpu(hardware_threads())
+
+
+@fieldwise_init
+struct GpuSpecs(ImplicitlyCopyable, TrivialRegisterPassable):
+    """What one accelerator reports about itself, asked once when a scope opens."""
+
+    var shared_memory_per_multiprocessor: Int
+    """Bytes of shared memory one multiprocessor holds, which is what bounds a strip's carry."""
+    var reserved_memory_per_block: Int
+    """The slice of that the driver keeps, measured on this target rather than reported by it."""
+    var largest_allocation: Int
+    """The biggest single buffer this device hands out, which is `maxBufferLength` on Metal."""
+    var streaming_multiprocessors: Int
+    """How many multiprocessors a grid has to fill."""
+
+
+def gpu_specs_fetch(ctx: DeviceContext) raises -> GpuSpecs:
+    """One cold query of the properties every sweep sizes itself from.
+
+    Each is a live driver call, so they are asked together and once.
+    """
+    return GpuSpecs(
+        Int(ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)),
+        SHARED_RESERVED,
+        Int(ctx.max_single_alloc_size()),
+        Int(ctx.get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT)),
+    )
+
+
+struct DeviceScope(Copyable, Movable):
+    """One accelerator and the specs it reported, so no sweep asks the driver twice."""
+
+    var context: DeviceContext
+    """Where every sweep is enqueued."""
+    var specs: GpuSpecs
+    """What that device said about itself, asked when this scope was opened."""
+
+    def __init__(out self, gpu_id: Int) raises:
+        """Opens the named accelerator and asks it, once, everything routing will need."""
+        self.context = DeviceContext(device_id=gpu_id)
+        self.specs = gpu_specs_fetch(self.context)
 
 
 def uniform_matrix(
@@ -168,36 +209,36 @@ def translate(text: String, alphabet: String) raises AffineGapsError -> List[Sca
     return codes^
 
 
-def allocate[dtype: DType](ctx: DeviceContext, count: Int) raises -> DeviceBuffer[dtype]:
+def allocate[dtype: DType](scope: DeviceScope, count: Int) raises -> DeviceBuffer[dtype]:
     """The one place a device buffer is created, and so the one place its size is refused.
 
-    A one-element floor keeps an empty batch from being its own case. The bound is the largest
-    contiguous allocation this device reports, which on Metal is a buffer limit well below the
-    card's memory rather than the memory itself.
+    A one-element floor keeps an empty batch from being its own case, and the bound comes off the
+    specs the scope already holds.
     """
     var elements = max(count, 1)
     var bytes = elements * size_of[Scalar[dtype]]()
-    var largest = Int(ctx.max_single_alloc_size())
-    if bytes > largest:
-        raise AffineGapsError(ErrorKind.SEQUENCE_TOO_LONG, String(bytes, " bytes over ", largest))
-    return ctx.enqueue_create_buffer[dtype](elements)
+    if bytes > scope.specs.largest_allocation:
+        raise AffineGapsError(
+            ErrorKind.SEQUENCE_TOO_LONG, String(bytes, " bytes over ", scope.specs.largest_allocation)
+        )
+    return scope.context.enqueue_create_buffer[dtype](elements)
 
 
-def upload[dtype: DType](ctx: DeviceContext, values: ImmSpan[Scalar[dtype], _]) raises -> DeviceBuffer[dtype]:
+def upload[dtype: DType](scope: DeviceScope, values: ImmSpan[Scalar[dtype], _]) raises -> DeviceBuffer[dtype]:
     """Stages values onto the device, keeping a one-element floor so an empty batch is not a case."""
-    var buffer = allocate[dtype](ctx, len(values))
+    var buffer = allocate[dtype](scope, len(values))
     if len(values) > 0:
-        ctx.enqueue_copy(buffer, values)
+        scope.context.enqueue_copy(buffer, values)
     return buffer^
 
 
-def filled[dtype: DType](ctx: DeviceContext, count: Int, value: Scalar[dtype]) raises -> DeviceBuffer[dtype]:
+def filled[dtype: DType](scope: DeviceScope, count: Int, value: Scalar[dtype]) raises -> DeviceBuffer[dtype]:
     """A device buffer every element of which is `value` before any kernel has written it."""
-    var buffer = allocate[dtype](ctx, count)
-    ctx.enqueue_memset(buffer, value)
+    var buffer = allocate[dtype](scope, count)
+    scope.context.enqueue_memset(buffer, value)
     return buffer^
 
 
-def zeroed[dtype: DType](ctx: DeviceContext, count: Int) raises -> DeviceBuffer[dtype]:
+def zeroed[dtype: DType](scope: DeviceScope, count: Int) raises -> DeviceBuffer[dtype]:
     """The zero fill, which is what a buffer read before it is written usually wants."""
-    return filled[dtype](ctx, count, Scalar[dtype](0))
+    return filled[dtype](scope, count, Scalar[dtype](0))

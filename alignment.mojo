@@ -31,17 +31,18 @@ from std.sys.info import size_of
 
 from max.algorithm import parallelize
 from max.gpu import barrier
-from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext, FuncAttribute
+from max.gpu.host import DeviceBuffer, FuncAttribute
 from max.gpu.memory import external_memory
 
 from errors import AffineGapsError, ErrorKind
 from common import (
+    DeviceScope,
     GAP_BYTE,
+    GpuSpecs,
     MAX_ALPHABET_SIZE,
     NEGATIVE_INFINITY,
     OffsetDType,
     Placement,
-    SHARED_RESERVED,
     ScoreDType,
     SubstitutionDType,
     SymbolDType,
@@ -85,14 +86,14 @@ struct Space(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Tiles over global-memory bands, bounded by nothing."""
 
 
-def band_length(ctx: DeviceContext) raises -> Int:
-    """How many rows one block's carry can index, read from the card rather than the build target.
+def band_length(specs: GpuSpecs) -> Int:
+    """How many rows one block's carry can index on this device.
 
-    `GPUInfo` is a per-architecture table keyed by whatever the kernels were compiled for, so a
-    wheel built against one accelerator would otherwise carry its neighbour's ceiling.
+    Derived from what the card reported rather than from the architecture the kernels were built
+    for, so one artifact serves every target it is run on.
     """
-    var shared = Int(ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
-    return (shared - SHARED_RESERVED - STATIC_SHARED_USED) // (CARRY_BANDS * 4) - 1
+    var usable = specs.shared_memory_per_multiprocessor - specs.reserved_memory_per_block
+    return (usable - STATIC_SHARED_USED) // (CARRY_BANDS * 4) - 1
 
 
 def serving_space(rows: Int, band: Int) -> Space:
@@ -1248,7 +1249,7 @@ def block_argmax(
 def device_scores[
     mode: AlignmentMode
 ](
-    ctx: DeviceContext,
+    scope: DeviceScope,
     sequences: ImmSpan[Scalar[SymbolDType], _],
     offsets: List[Scalar[OffsetDType]],
     substitutions: ImmSpan[Scalar[SubstitutionDType], _],
@@ -1267,22 +1268,22 @@ def device_scores[
     var band_stride = longest_first + 1
     var dynamic_bytes = 2 * band_stride * 4
 
-    var sequences_buffer = upload(ctx, sequences)
-    var offsets_buffer = upload(ctx, offsets)
-    var substitutions_buffer = upload(ctx, substitutions)
-    var results_buffer = zeroed[ScoreDType](ctx, pairs)
-    var unused_symbols = allocate[SymbolDType](ctx, 1)
+    var sequences_buffer = upload(scope, sequences)
+    var offsets_buffer = upload(scope, offsets)
+    var substitutions_buffer = upload(scope, substitutions)
+    var results_buffer = zeroed[ScoreDType](scope, pairs)
+    var unused_symbols = allocate[SymbolDType](scope, 1)
     """A discarding sweep never reads or writes these, but the one kernel still names them."""
-    var unused_changes = allocate[ChangeDType](ctx, 1)
-    var unused_offsets = zeroed[DType.int64](ctx, 1)
-    var unused_lengths = zeroed[ScoreDType](ctx, 1)
+    var unused_changes = allocate[ChangeDType](scope, 1)
+    var unused_offsets = zeroed[DType.int64](scope, 1)
+    var unused_lengths = zeroed[ScoreDType](scope, 1)
     var nowhere = unused_symbols.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
     """
     One placeholder fills every symbol slot. The origin cast is what lets it appear more than once in a launch, and it
     is sound because a discarding sweep reads none of them.
     """
 
-    ctx.enqueue_function[strip_pair_kernel[mode, Recording.DISCARDED]](
+    scope.context.enqueue_function[strip_pair_kernel[mode, Recording.DISCARDED]](
         sequences_buffer.unsafe_ptr(),
         offsets_buffer.unsafe_ptr(),
         substitutions_buffer.unsafe_ptr(),
@@ -1303,7 +1304,7 @@ def device_scores[
         shared_mem_bytes=dynamic_bytes,
         func_attribute=FuncAttribute.MAX_DYNAMIC_SHARED_SIZE_BYTES(UInt32(dynamic_bytes)),
     )
-    ctx.synchronize()
+    scope.context.synchronize()
 
     var results = List[Int32](capacity=pairs)
     with results_buffer.map_to_host() as host:
@@ -1557,7 +1558,7 @@ def strip_pair_kernel[
 def device_alignments[
     mode: AlignmentMode
 ](
-    ctx: DeviceContext,
+    scope: DeviceScope,
     sequences: ImmSpan[Scalar[SymbolDType], _],
     offsets: List[Scalar[OffsetDType]],
     substitutions: ImmSpan[Scalar[SubstitutionDType], _],
@@ -1585,21 +1586,21 @@ def device_alignments[
         widest = max(widest, rows + columns)
     change_offsets.append(running)
 
-    var sequences_buffer = upload(ctx, sequences)
-    var offsets_buffer = upload(ctx, offsets)
-    var substitutions_buffer = upload(ctx, substitutions)
+    var sequences_buffer = upload(scope, sequences)
+    var offsets_buffer = upload(scope, offsets)
+    var substitutions_buffer = upload(scope, substitutions)
     var letters = List[Scalar[SymbolDType]](capacity=alphabet_size)
     for index in range(alphabet_size):
         letters.append(Scalar[SymbolDType](alphabet_bytes[index]))
-    var letters_buffer = upload(ctx, letters)
-    var changes_buffer = allocate[ChangeDType](ctx, Int(max(running, Int64(1))))
-    var change_offsets_buffer = upload(ctx, change_offsets)
-    var results_buffer = zeroed[ScoreDType](ctx, pairs)
-    var first_buffer = allocate[SymbolDType](ctx, max(pairs * widest, 1))
-    var second_buffer = allocate[SymbolDType](ctx, max(pairs * widest, 1))
-    var lengths_buffer = zeroed[ScoreDType](ctx, pairs)
+    var letters_buffer = upload(scope, letters)
+    var changes_buffer = allocate[ChangeDType](scope, Int(max(running, Int64(1))))
+    var change_offsets_buffer = upload(scope, change_offsets)
+    var results_buffer = zeroed[ScoreDType](scope, pairs)
+    var first_buffer = allocate[SymbolDType](scope, max(pairs * widest, 1))
+    var second_buffer = allocate[SymbolDType](scope, max(pairs * widest, 1))
+    var lengths_buffer = zeroed[ScoreDType](scope, pairs)
 
-    ctx.enqueue_function[strip_pair_kernel[mode, Recording.TO_GLOBAL_MEMORY]](
+    scope.context.enqueue_function[strip_pair_kernel[mode, Recording.TO_GLOBAL_MEMORY]](
         sequences_buffer.unsafe_ptr(),
         offsets_buffer.unsafe_ptr(),
         substitutions_buffer.unsafe_ptr(),
@@ -1620,7 +1621,7 @@ def device_alignments[
         shared_mem_bytes=2 * (longest_first + 1) * 4,
         func_attribute=FuncAttribute.MAX_DYNAMIC_SHARED_SIZE_BYTES(UInt32(2 * (longest_first + 1) * 4)),
     )
-    ctx.synchronize()
+    scope.context.synchronize()
 
     var aligned = List[AlignmentResult](capacity=pairs)
     with results_buffer.map_to_host() as scores_host, lengths_buffer.map_to_host() as lengths_host, first_buffer.map_to_host() as first_host, second_buffer.map_to_host() as second_host:
@@ -1643,7 +1644,7 @@ def device_alignments[
 
 
 def device_hirschberg(
-    ctx: DeviceContext,
+    scope: DeviceScope,
     mut buffers: SweepBuffers,
     first: ImmSpan[Scalar[SymbolDType], _],
     second: ImmSpan[Scalar[SymbolDType], _],
@@ -1766,13 +1767,13 @@ def device_hirschberg(
             )
             joins[index * 3 + 2] = Scalar[ScoreDType](width)
 
-        device_sweep_level[AlignmentMode.GLOBAL](ctx, buffers, sweeps, alphabet_size, scoring)
+        device_sweep_level[AlignmentMode.GLOBAL](scope, buffers, sweeps, alphabet_size, scoring)
 
         for index in range(len(splitting)):
             joins[index * 3] = Scalar[ScoreDType](sweeps[index * 2].column_base)
             joins[index * 3 + 1] = Scalar[ScoreDType](sweeps[index * 2 + 1].column_base)
-        var joins_buffer = upload(ctx, Span(joins))
-        ctx.enqueue_function[crossing_kernel](
+        var joins_buffer = upload(scope, Span(joins))
+        scope.context.enqueue_function[crossing_kernel](
             buffers.top_scores.unsafe_ptr(),
             buffers.top_deletes.unsafe_ptr(),
             buffers.reverse_scores.unsafe_ptr(),
@@ -1783,7 +1784,7 @@ def device_hirschberg(
             grid_dim=len(splitting),
             block_dim=THREADS_PER_BLOCK,
         )
-        ctx.synchronize()
+        scope.context.synchronize()
 
         var children = List[Frame]()
         with buffers.crossing.map_to_host() as host:
@@ -2174,7 +2175,7 @@ struct SweepBuffers(Movable):
 
 
 def device_sweep_buffers(
-    ctx: DeviceContext,
+    scope: DeviceScope,
     rows: Int,
     columns: Int,
     sequences: ImmSpan[Scalar[SymbolDType], _],
@@ -2207,25 +2208,25 @@ def device_sweep_buffers(
     var block_slots = min(ceildiv(rows, MIN_TILE_HEIGHT), tile_columns_count) + 4
     """Only a local scan writes here, and that is one sweep, so the grid is one tile-diagonal wide."""
     var buffers = SweepBuffers(
-        allocate[SymbolDType](ctx, max(rows + columns, 1)),
-        allocate[SubstitutionDType](ctx, len(substitutions)),
-        allocate[ScoreDType](ctx, frontier_span),
-        allocate[ScoreDType](ctx, frontier_span),
-        allocate[ScoreDType](ctx, frontier_span),
-        allocate[ScoreDType](ctx, frontier_span),
-        allocate[ScoreDType](ctx, 4 * max(rows, 1)),
-        allocate[ScoreDType](ctx, left_span),
-        allocate[ScoreDType](ctx, left_span),
-        allocate[ScoreDType](ctx, corner_span),
+        allocate[SymbolDType](scope, max(rows + columns, 1)),
+        allocate[SubstitutionDType](scope, len(substitutions)),
+        allocate[ScoreDType](scope, frontier_span),
+        allocate[ScoreDType](scope, frontier_span),
+        allocate[ScoreDType](scope, frontier_span),
+        allocate[ScoreDType](scope, frontier_span),
+        allocate[ScoreDType](scope, 4 * max(rows, 1)),
+        allocate[ScoreDType](scope, left_span),
+        allocate[ScoreDType](scope, left_span),
+        allocate[ScoreDType](scope, corner_span),
         corner_span,
         left_span,
         frontier_span,
-        zeroed[ScoreDType](ctx, block_slots),
-        zeroed[DType.int64](ctx, block_slots),
+        zeroed[ScoreDType](scope, block_slots),
+        zeroed[DType.int64](scope, block_slots),
         block_slots,
     )
-    ctx.enqueue_copy(buffers.sequences, sequences)
-    ctx.enqueue_copy(buffers.substitutions, substitutions)
+    scope.context.enqueue_copy(buffers.sequences, sequences)
+    scope.context.enqueue_copy(buffers.substitutions, substitutions)
     return buffers^
 
 
@@ -2327,7 +2328,7 @@ struct Sweep(ImplicitlyCopyable, TrivialRegisterPassable):
 def device_local_extremum[
     half: SweepHalf
 ](
-    ctx: DeviceContext,
+    scope: DeviceScope,
     mut buffers: SweepBuffers,
     rows: Int,
     first_to: Int,
@@ -2345,9 +2346,9 @@ def device_local_extremum[
     sweeps.append(Sweep(first_to, second_to, 0, rows, 0, 0, GapRun.OPENS, half))
     # Blocks that fall outside their sweep return without writing, and the buffers outlive the
     # scan, so anything left from an earlier one would be read as a candidate.
-    ctx.enqueue_memset(buffers.block_best, Scalar[ScoreDType](0))
-    ctx.enqueue_memset(buffers.block_place, Scalar[DType.int64](0))
-    device_sweep_level[AlignmentMode.LOCAL](ctx, buffers, sweeps, alphabet_size, scoring)
+    scope.context.enqueue_memset(buffers.block_best, Scalar[ScoreDType](0))
+    scope.context.enqueue_memset(buffers.block_place, Scalar[DType.int64](0))
+    device_sweep_level[AlignmentMode.LOCAL](scope, buffers, sweeps, alphabet_size, scoring)
 
     var best = Int32(0)
     var best_place = Int64(0)
@@ -2365,7 +2366,7 @@ def device_local_extremum[
 def device_sweep_level[
     mode: AlignmentMode
 ](
-    ctx: DeviceContext,
+    scope: DeviceScope,
     mut buffers: SweepBuffers,
     mut sweeps: List[Sweep],
     alphabet_size: Int,
@@ -2431,9 +2432,9 @@ def device_sweep_level[
     var source = plan.unsafe_ptr().unsafe_bitcast[Scalar[PlanDType]]()
     for index in range(len(words)):
         words[index] = source[unsafe_offset=index]
-    var plan_buffer = upload(ctx, Span(words))
+    var plan_buffer = upload(scope, Span(words))
     for tile_anti_diagonal in range(deepest):
-        ctx.enqueue_function[tiled_sweep_kernel[mode]](
+        scope.context.enqueue_function[tiled_sweep_kernel[mode]](
             buffers.sequences.unsafe_ptr(),
             buffers.substitutions.unsafe_ptr(),
             plan_buffer.unsafe_ptr(),
@@ -2454,7 +2455,7 @@ def device_sweep_level[
             grid_dim=widest_tiles * len(sweeps),
             block_dim=STRIP_LANES,
         )
-    ctx.synchronize()
+    scope.context.synchronize()
 
 
 def border_score[mode: AlignmentMode](rows: Int, columns: Int, scoring: AffineGapCosts) -> Int32:
@@ -2470,7 +2471,7 @@ def border_score[mode: AlignmentMode](rows: Int, columns: Int, scoring: AffineGa
 def device_score[
     mode: AlignmentMode
 ](
-    ctx: DeviceContext,
+    scope: DeviceScope,
     first: ImmSpan[Scalar[SymbolDType], _],
     second: ImmSpan[Scalar[SymbolDType], _],
     substitutions: ImmSpan[Scalar[SubstitutionDType], _],
@@ -2492,11 +2493,11 @@ def device_score[
     var sequences = List[Scalar[SymbolDType]](capacity=rows + columns)
     sequences.extend(first)
     sequences.extend(second)
-    var buffers = device_sweep_buffers(ctx, rows, columns, Span(sequences), substitutions)
+    var buffers = device_sweep_buffers(scope, rows, columns, Span(sequences), substitutions)
 
     comptime if mode == AlignmentMode.LOCAL:
         var last_row, last_column, best = device_local_extremum[SweepHalf.FORWARD](
-            ctx, buffers, rows, rows, columns, alphabet_size, scoring
+            scope, buffers, rows, rows, columns, alphabet_size, scoring
         )
         _ = last_row
         _ = last_column
@@ -2504,7 +2505,7 @@ def device_score[
 
     var sweeps = List[Sweep]()
     sweeps.append(Sweep(rows, columns, 0, rows, 0, 0, GapRun.OPENS, SweepHalf.FORWARD))
-    device_sweep_level[AlignmentMode.GLOBAL](ctx, buffers, sweeps, alphabet_size, scoring)
+    device_sweep_level[AlignmentMode.GLOBAL](scope, buffers, sweeps, alphabet_size, scoring)
     with buffers.top_scores.map_to_host() as frontier:
         return frontier[sweeps[0].column_base + columns]
 
@@ -2512,7 +2513,7 @@ def device_score[
 def device_align[
     mode: AlignmentMode
 ](
-    ctx: DeviceContext,
+    scope: DeviceScope,
     first: ImmSpan[Scalar[SymbolDType], _],
     second: ImmSpan[Scalar[SymbolDType], _],
     substitutions: ImmSpan[Scalar[SubstitutionDType], _],
@@ -2535,12 +2536,12 @@ def device_align[
     var sequences = List[Scalar[SymbolDType]](capacity=rows + columns)
     sequences.extend(first)
     sequences.extend(second)
-    var buffers = device_sweep_buffers(ctx, rows, columns, Span(sequences), substitutions)
+    var buffers = device_sweep_buffers(scope, rows, columns, Span(sequences), substitutions)
     """One scratch set for the whole alignment: the local scans and the recursion take it in turn."""
 
     comptime if mode == AlignmentMode.GLOBAL:
         device_hirschberg(
-            ctx,
+            scope,
             buffers,
             first,
             second,
@@ -2561,7 +2562,7 @@ def device_align[
         return AlignmentResult(reached, whole[0], whole[1])
 
     var last_row, last_column, score = device_local_extremum[SweepHalf.FORWARD](
-        ctx, buffers, rows, rows, columns, alphabet_size, scoring
+        scope, buffers, rows, rows, columns, alphabet_size, scoring
     )
 
     var first_row = last_row
@@ -2571,13 +2572,13 @@ def device_align[
     """
     if score > 0:
         var back_rows, back_columns, _ = device_local_extremum[SweepHalf.REVERSE](
-            ctx, buffers, rows, last_row, last_column, alphabet_size, scoring
+            scope, buffers, rows, last_row, last_column, alphabet_size, scoring
         )
         first_row = last_row - back_rows
         var first_column = last_column - back_columns
         path_columns[last_row] = Int32(last_column)
         device_hirschberg(
-            ctx,
+            scope,
             buffers,
             first,
             second,

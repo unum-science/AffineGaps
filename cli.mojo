@@ -17,7 +17,6 @@ from std.io import FileDescriptor
 from std.sys import argv, exit
 from std.time import perf_counter_ns
 
-from max.gpu.host import DeviceContext
 
 from alignment import (
     AffineGapCosts,
@@ -35,7 +34,8 @@ from cofolding import SankoffScoring, device_cofold, serial_cofold
 from common import (
     DEFAULT_PROTEINS_ALPHABET,
     DEFAULT_RNA_ALPHABET,
-    Executor,
+    Device,
+    DeviceScope,
     Placement,
     SubstitutionDType,
     SymbolDType,
@@ -142,7 +142,7 @@ struct Requested(ImplicitlyCopyable, Movable):
     collected here and turned into a placement once, after the loop has seen everything.
     """
 
-    var executor: Optional[Executor]
+    var device: Optional[Device]
     """The sweep the caller named, absent when they named none."""
     var gpu_id: Optional[Int]
     """The accelerator the caller named, absent when they named none."""
@@ -161,14 +161,14 @@ def placement_of(request: Requested) raises AffineGapsError -> Placement:
     Naming an accelerator is asking for one, so it settles a device the caller left unnamed and
     contradicts one they named as the host.
     """
-    var on_host = request.executor and request.executor.value() == Executor.HOST
+    var on_cpu = request.device and request.device.value() == Device.CPU
     if request.gpu_id:
-        if on_host:
+        if on_cpu:
             raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, "--gpu-id with --device cpu")
-        return Placement.device(request.gpu_id.value(), request.threads)
-    if request.executor and request.executor.value() == Executor.DEVICE:
-        return Placement.device(0, request.threads)
-    return Placement.host(request.threads)
+        return Placement.on_gpu(request.gpu_id.value(), request.threads)
+    if request.device and request.device.value() == Device.GPU:
+        return Placement.on_gpu(0, request.threads)
+    return Placement.on_cpu(request.threads)
 
 
 @fieldwise_init
@@ -215,9 +215,9 @@ def shared_flag(flag: String, value: String, mut options: Options) raises Affine
         return 1
     if flag == "--device":
         if value == "gpu":
-            options.request.executor = Executor.DEVICE
+            options.request.device = Device.GPU
         elif value == "cpu":
-            options.request.executor = Executor.HOST
+            options.request.device = Device.CPU
         else:
             raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String("device ", value))
         return 2
@@ -278,7 +278,7 @@ def report_placement(placement: Placement, options: Options, cells: Int, nanosec
     """
     var errors = FileDescriptor(2)
     # The index only names something when there is an accelerator for it to name.
-    var device = String("gpu:", placement.gpu_id) if placement.executor == Executor.DEVICE else String("cpu")
+    var device = String("gpu:", placement.gpu_id) if placement.device == Device.GPU else String("cpu")
 
     var seconds = Float64(nanoseconds) / 1e9
     var rate = Float64(cells) / seconds / 1e6 if seconds > 0 else 0.0
@@ -305,9 +305,9 @@ def aligned_pair[
     placement: Placement,
 ) raises -> AlignmentResult:
     """Runs one pair where the caller asked, which is the only thing the verb decides."""
-    if placement.executor == Executor.DEVICE:
+    if placement.device == Device.GPU:
         return device_align[mode](
-            DeviceContext(device_id=placement.gpu_id),
+            DeviceScope(placement.gpu_id),
             first,
             second,
             substitutions,
@@ -406,7 +406,7 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
                 quote(result.first_gapped),
                 quote(result.second_gapped),
                 Int(result.score),
-                quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+                quote("gpu" if placement.device == Device.GPU else "cpu"),
                 placement.gpu_id,
                 placement.threads,
             )
@@ -452,8 +452,8 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
     var placement = placement_of(options.request)
     var started = perf_counter_ns()
     var result = device_fold(
-        DeviceContext(device_id=placement.gpu_id), sequence_text
-    ) if placement.executor == Executor.DEVICE else serial_fold(sequence_text)
+        DeviceScope(placement.gpu_id), sequence_text
+    ) if placement.device == Device.GPU else serial_fold(sequence_text)
     var elapsed = perf_counter_ns() - started
     var energy = Float64(Int(result.decikcal)) / 10.0
 
@@ -466,7 +466,7 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
                 quote(sequence_text),
                 quote(result.structure),
                 energy,
-                quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+                quote("gpu" if placement.device == Device.GPU else "cpu"),
                 placement.gpu_id,
             )
         )
@@ -525,14 +525,14 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
     var scoring = SankoffScoring(Int32(gap))
     var started = perf_counter_ns()
     var result = device_cofold(
-        DeviceContext(device_id=placement.gpu_id),
+        DeviceScope(placement.gpu_id),
         first_text,
         second_text,
         alphabet,
         scoring,
         match_score,
         mismatch_score,
-    ) if placement.executor == Executor.DEVICE else serial_cofold(
+    ) if placement.device == Device.GPU else serial_cofold(
         first_text, second_text, alphabet, scoring, match_score, mismatch_score
     )
     var elapsed = perf_counter_ns() - started
@@ -550,7 +550,7 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
                 quote(result.gapped_second),
                 quote(result.structure),
                 Int(result.score),
-                quote("gpu" if placement.executor == Executor.DEVICE else "cpu"),
+                quote("gpu" if placement.device == Device.GPU else "cpu"),
                 placement.gpu_id,
             )
         )

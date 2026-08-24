@@ -25,12 +25,12 @@ from std.os import abort
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from max.gpu.host import DeviceContext
 
 from common import (
     DEFAULT_PROTEINS_ALPHABET,
     DEFAULT_RNA_ALPHABET,
-    Executor,
+    Device,
+    DeviceScope,
     FALLBACK_LETTER,
     OffsetDType,
     Placement,
@@ -150,11 +150,6 @@ def gotoh_score[
     return PythonObject(Int(serial_score[mode](left, right, substitutions, alphabet_size, scoring)))
 
 
-def device_band(placement: Placement) raises -> Int:
-    """How many rows the strip kernels can carry on the accelerator this call names."""
-    return band_length(DeviceContext(device_id=placement.gpu_id))
-
-
 def gotoh_score_linear_gpu[
     mode: AlignmentMode
 ](
@@ -162,16 +157,14 @@ def gotoh_score_linear_gpu[
     second: PythonObject,
     substitution: PythonObject,
     gaps: PythonObject,
-    placement: Placement,
+    scope: DeviceScope,
 ) raises -> PythonObject:
     """One pair scored with every sweep on the device, for a pair too tall for one block's carry."""
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
     var left = translate(String(first), alphabet)
     var right = translate(String(second), alphabet)
-    var score = device_score[mode](
-        DeviceContext(device_id=placement.gpu_id), left, right, substitutions, alphabet_size, scoring
-    )
+    var score = device_score[mode](scope, left, right, substitutions, alphabet_size, scoring)
     return PythonObject(Int(score))
 
 
@@ -228,7 +221,7 @@ def gotoh_scores_batch[
     seconds: PythonObject,
     substitution: PythonObject,
     gaps: PythonObject,
-    placement: Placement,
+    scope: DeviceScope,
 ) raises -> PythonObject:
     """Scores a whole batch on the GPU, one thread block per pair.
 
@@ -247,8 +240,7 @@ def gotoh_scores_batch[
 
     var tape = pack_batch(firsts, seconds, alphabet)
 
-    var ctx = DeviceContext(device_id=placement.gpu_id)
-    var scores = device_scores[mode](ctx, tape.sequences, tape.offsets, substitutions, alphabet_size, scoring)
+    var scores = device_scores[mode](scope, tape.sequences, tape.offsets, substitutions, alphabet_size, scoring)
     var output = Python().list()
     for index in range(len(scores)):
         output.append(PythonObject(Int(scores[index])))
@@ -262,7 +254,7 @@ def gotoh_alignments_batch[
     seconds: PythonObject,
     substitution: PythonObject,
     gaps: PythonObject,
-    placement: Placement,
+    scope: DeviceScope,
 ) raises -> PythonObject:
     """Aligns a whole batch on the GPU, returning `[first_gapped, second_gapped, score]` triples.
 
@@ -279,8 +271,7 @@ def gotoh_alignments_batch[
 
     var tape = pack_batch(firsts, seconds, alphabet)
 
-    var ctx = DeviceContext(device_id=placement.gpu_id)
-    var aligned = device_alignments[mode](ctx, tape.sequences, tape.offsets, substitutions, alphabet, scoring)
+    var aligned = device_alignments[mode](scope, tape.sequences, tape.offsets, substitutions, alphabet, scoring)
     var output = Python().list()
     for index in range(len(aligned)):
         var triple = alignment_triple(aligned[index].first_gapped, aligned[index].second_gapped, aligned[index].score)
@@ -338,6 +329,17 @@ def levenshtein_alignment(first: PythonObject, second: PythonObject) raises -> P
     return triple
 
 
+def gpu_specs(gpu_id: PythonObject) raises -> PythonObject:
+    """What the named accelerator reports about itself, in the order `GpuSpecs` declares."""
+    var scope = DeviceScope(optional_int(gpu_id).or_else(0))
+    var reported = Python().list()
+    reported.append(PythonObject(scope.specs.shared_memory_per_multiprocessor))
+    reported.append(PythonObject(scope.specs.reserved_memory_per_block))
+    reported.append(PythonObject(scope.specs.largest_allocation))
+    reported.append(PythonObject(scope.specs.streaming_multiprocessors))
+    return reported
+
+
 def zuker_fold(sequence: PythonObject, requested: PythonObject) raises -> PythonObject:
     """Minimum free energy folding of one RNA sequence over the Turner nearest-neighbour model.
 
@@ -348,8 +350,8 @@ def zuker_fold(sequence: PythonObject, requested: PythonObject) raises -> Python
     var placement = placement_from(requested)
     var result: FoldResult
     if String(requested.device) == "gpu":
-        var ctx = DeviceContext(device_id=placement.gpu_id)
-        result = device_fold(ctx, text)
+        var scope = DeviceScope(placement.gpu_id)
+        result = device_fold(scope, text)
     else:
         result = serial_fold(text)
 
@@ -382,8 +384,8 @@ def sankoff_cofold(
     var placement = placement_from(requested)
     var result: CofoldResult
     if String(requested.device) == "gpu":
-        var ctx = DeviceContext(device_id=placement.gpu_id)
-        result = device_cofold(ctx, left, right, alphabet, scoring, match_score, mismatch_score)
+        var scope = DeviceScope(placement.gpu_id)
+        result = device_cofold(scope, left, right, alphabet, scoring, match_score, mismatch_score)
     else:
         result = serial_cofold(left, right, alphabet, scoring, match_score, mismatch_score)
 
@@ -449,6 +451,7 @@ def needleman_wunsch_gotoh_alignment_linear_gpu(
     second: PythonObject,
     substitution: PythonObject,
     gaps: PythonObject,
+    scope: DeviceScope,
     placement: Placement,
 ) raises -> PythonObject:
     """Global alignment in linear space with every sweep running on the device."""
@@ -457,7 +460,7 @@ def needleman_wunsch_gotoh_alignment_linear_gpu(
     var left = translate(String(first), alphabet)
     var right = translate(String(second), alphabet)
     var result = device_align[AlignmentMode.GLOBAL](
-        DeviceContext(device_id=placement.gpu_id),
+        scope,
         left,
         right,
         substitutions,
@@ -545,6 +548,7 @@ def smith_waterman_gotoh_alignment_linear_gpu(
     second: PythonObject,
     substitution: PythonObject,
     gaps: PythonObject,
+    scope: DeviceScope,
     placement: Placement,
 ) raises -> PythonObject:
     """Local alignment in linear space with every sweep running on the device."""
@@ -553,7 +557,7 @@ def smith_waterman_gotoh_alignment_linear_gpu(
     var left = translate(String(first), alphabet)
     var right = translate(String(second), alphabet)
     var result = device_align[AlignmentMode.LOCAL](
-        DeviceContext(device_id=placement.gpu_id),
+        scope,
         left,
         right,
         substitutions,
@@ -577,21 +581,21 @@ def mode_from(value: PythonObject) raises -> AlignmentMode:
 
 
 def placement_from(requested: PythonObject) raises -> Placement:
-    """Reads the caller's placement record, which names the executor, the accelerator and the width."""
+    """Reads the caller's placement record, which names the device, the accelerator and the width."""
     var gpu_id = optional_int(requested.gpu_id).or_else(0)
     var threads = optional_int(requested.threads).or_else(hardware_threads())
-    if executor_from(requested.device) == Executor.DEVICE:
-        return Placement.device(gpu_id, threads)
-    return Placement.host(threads)
+    if device_from(requested.device) == Device.GPU:
+        return Placement.on_gpu(gpu_id, threads)
+    return Placement.on_cpu(threads)
 
 
-def executor_from(value: PythonObject) raises -> Executor:
-    """Reads the device a caller named."""
+def device_from(value: PythonObject) raises -> Device:
+    """Reads the device a caller named, refusing anything this build does not serve."""
     var name = String(value)
     if name == "cpu":
-        return Executor.HOST
+        return Device.CPU
     if name == "gpu":
-        return Executor.DEVICE
+        return Device.GPU
     raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String("device ", name))
 
 
@@ -617,7 +621,7 @@ def gotoh_scores(
     can index goes out with the batch, and a taller one takes the tiled sweep by itself.
     """
     var requested_mode = mode_from(mode)
-    var executor = executor_from(requested.device)
+    var device = device_from(requested.device)
     var pairs = paired_length(firsts, seconds)
 
     var results = Python().list()
@@ -626,7 +630,7 @@ def gotoh_scores(
     for _ in range(pairs):
         results.append(Python().none())
 
-    if executor == Executor.HOST:
+    if device == Device.CPU:
         for index in range(pairs):
             comptime for choice in range(len(ALL_MODES)):
                 comptime candidate = ALL_MODES[choice]
@@ -635,7 +639,9 @@ def gotoh_scores(
         return results
 
     var placement = placement_from(requested)
-    var band = device_band(placement)
+    var scope = DeviceScope(placement.gpu_id)
+    """One context for the whole call, so the band query is not a second accelerator handshake."""
+    var band = band_length(scope.specs)
     var banded = List[Int]()
     """The strip kernel indexes its carry by the first sequence, so height alone decides."""
     var tiled = List[Int]()
@@ -654,7 +660,7 @@ def gotoh_scores(
         comptime for index in range(len(ALL_MODES)):
             comptime candidate = ALL_MODES[index]
             if requested_mode == candidate:
-                var scored = gotoh_scores_batch[candidate](batch_firsts, batch_seconds, substitution, gaps, placement)
+                var scored = gotoh_scores_batch[candidate](batch_firsts, batch_seconds, substitution, gaps, scope)
                 for slot in range(len(banded)):
                     results[banded[slot]] = scored[slot]
 
@@ -664,50 +670,64 @@ def gotoh_scores(
             comptime candidate = ALL_MODES[choice]
             if requested_mode == candidate:
                 results[index] = gotoh_score_linear_gpu[candidate](
-                    firsts[index], seconds[index], substitution, gaps, placement
+                    firsts[index], seconds[index], substitution, gaps, scope
                 )
     return results
 
 
-def align_pair(
+def align_pair_host(
     first: PythonObject,
     second: PythonObject,
     mode: AlignmentMode,
-    executor: Executor,
     stored_budget: Int,
-    band: Int,
     substitution: PythonObject,
     gaps: PythonObject,
-    placement: Placement,
 ) raises -> PythonObject:
-    """One pair, on the path its matrix can afford."""
-    var cells = python_length(first) * python_length(second)
-    var limit = min(stored_budget, DEVICE_STORED_CELLS) if executor == Executor.DEVICE else stored_budget
-    var too_tall = executor == Executor.DEVICE and serving_space(python_length(first), band) == Space.TILED
-    if cells > limit or too_tall:
-        if executor == Executor.DEVICE:
-            if mode == AlignmentMode.LOCAL:
-                return smith_waterman_gotoh_alignment_linear_gpu(first, second, substitution, gaps, placement)
-            return needleman_wunsch_gotoh_alignment_linear_gpu(first, second, substitution, gaps, placement)
+    """One pair on the host, stored while its matrix fits the budget and linear once it does not."""
+    if python_length(first) * python_length(second) > stored_budget:
         if mode == AlignmentMode.LOCAL:
             return smith_waterman_gotoh_alignment_linear(first, second, substitution, gaps)
         return needleman_wunsch_gotoh_alignment_linear(first, second, substitution, gaps)
-
-    if executor == Executor.DEVICE:
-        var lefts = Python().list()
-        """No single-pair device entry exists for the stored traceback, so this is a batch of one."""
-        var rights = Python().list()
-        lefts.append(first)
-        rights.append(second)
-        comptime for index in range(len(ALL_MODES)):
-            comptime candidate = ALL_MODES[index]
-            if mode == candidate:
-                return gotoh_alignments_batch[candidate](lefts, rights, substitution, gaps, placement)[0]
 
     comptime for index in range(len(ALL_MODES)):
         comptime candidate = ALL_MODES[index]
         if mode == candidate:
             return gotoh_alignment[candidate](first, second, substitution, gaps)
+    raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, "alignment mode")
+
+
+def align_pair_device(
+    first: PythonObject,
+    second: PythonObject,
+    mode: AlignmentMode,
+    stored_budget: Int,
+    band: Int,
+    substitution: PythonObject,
+    gaps: PythonObject,
+    scope: DeviceScope,
+    placement: Placement,
+) raises -> PythonObject:
+    """One pair on the device, on the sweep its height and its matrix can afford.
+
+    Both bounds are real and independent: the stored kernel indexes its carry by the first
+    sequence, so a tall pair fails it even when the whole matrix would fit.
+    """
+    var cells = python_length(first) * python_length(second)
+    var stored = cells <= min(stored_budget, DEVICE_STORED_CELLS)
+    if not stored or serving_space(python_length(first), band) == Space.TILED:
+        if mode == AlignmentMode.LOCAL:
+            return smith_waterman_gotoh_alignment_linear_gpu(first, second, substitution, gaps, scope, placement)
+        return needleman_wunsch_gotoh_alignment_linear_gpu(first, second, substitution, gaps, scope, placement)
+
+    var lefts = Python().list()
+    """No single-pair device entry exists for the stored traceback, so this is a batch of one."""
+    var rights = Python().list()
+    lefts.append(first)
+    rights.append(second)
+    comptime for index in range(len(ALL_MODES)):
+        comptime candidate = ALL_MODES[index]
+        if mode == candidate:
+            return gotoh_alignments_batch[candidate](lefts, rights, substitution, gaps, scope)[0]
     raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, "alignment mode")
 
 
@@ -726,7 +746,7 @@ def gotoh_alignments(
     pair, because the two tracebacks cannot share a launch.
     """
     var requested_mode = mode_from(mode)
-    var executor = executor_from(requested.device)
+    var device = device_from(requested.device)
     var placement = placement_from(requested)
     var budget = Int(String(stored_budget))
     var pairs = paired_length(firsts, seconds)
@@ -734,47 +754,53 @@ def gotoh_alignments(
     var limit = budget if pairs > 1 else min(budget, DEVICE_STORED_CELLS)
     """A batch of one is a single pair however it arrived, and gets the single pair's crossover."""
 
-    var band = device_band(placement) if executor == Executor.DEVICE else 0
-    """Only the device path has a carry to outgrow, so the host never pays for the query."""
+    var results = Python().list()
+    for _ in range(pairs):
+        results.append(Python().none())
+    var placed = List[Bool](length=pairs, fill=False)
+    var band = 0
 
-    var batchable = List[Int]()
-    """
-    Both bounds are real and independent: the stored kernel indexes its carry by the first sequence, so a tall pair
-    fails it even when the whole matrix would fit. A pair that fails either one takes the linear path by itself rather
-    than dragging the batch down with it.
-    """
-    if executor == Executor.DEVICE:
+    # One context serves the whole device call, and a host call names no accelerator at all.
+    if device == Device.GPU:
+        var scope = DeviceScope(placement.gpu_id)
+        band = band_length(scope.specs)
+
+        var batchable = List[Int]()
+        """
+        Both bounds are real and independent: the stored kernel indexes its carry by the first sequence, so a tall
+        pair fails it even when the whole matrix would fit. A pair that fails either one takes the linear path by
+        itself rather than dragging the batch down with it.
+        """
         for index in range(pairs):
             var rows = python_length(firsts[index])
             if rows * python_length(seconds[index]) <= limit and serving_space(rows, band) == Space.BANDED:
                 batchable.append(index)
 
-    var results = Python().list()
-    for _ in range(pairs):
-        results.append(Python().none())
-    var placed = List[Bool](length=pairs, fill=False)
+        if len(batchable) > 0:
+            var batch_firsts = Python().list()
+            var batch_seconds = Python().list()
+            for slot in range(len(batchable)):
+                batch_firsts.append(firsts[batchable[slot]])
+                batch_seconds.append(seconds[batchable[slot]])
+            comptime for index in range(len(ALL_MODES)):
+                comptime candidate = ALL_MODES[index]
+                if requested_mode == candidate:
+                    var aligned = gotoh_alignments_batch[candidate](
+                        batch_firsts, batch_seconds, substitution, gaps, scope
+                    )
+                    for slot in range(len(batchable)):
+                        results[batchable[slot]] = aligned[slot]
+                        placed[batchable[slot]] = True
 
-    if len(batchable) > 0:
-        var batch_firsts = Python().list()
-        var batch_seconds = Python().list()
-        for slot in range(len(batchable)):
-            batch_firsts.append(firsts[batchable[slot]])
-            batch_seconds.append(seconds[batchable[slot]])
-        comptime for index in range(len(ALL_MODES)):
-            comptime candidate = ALL_MODES[index]
-            if requested_mode == candidate:
-                var aligned = gotoh_alignments_batch[candidate](
-                    batch_firsts, batch_seconds, substitution, gaps, placement
+        for index in range(pairs):
+            if not placed[index]:
+                results[index] = align_pair_device(
+                    firsts[index], seconds[index], requested_mode, budget, band, substitution, gaps, scope, placement
                 )
-                for slot in range(len(batchable)):
-                    results[batchable[slot]] = aligned[slot]
-                    placed[batchable[slot]] = True
+        return results
 
     for index in range(pairs):
-        if not placed[index]:
-            results[index] = align_pair(
-                firsts[index], seconds[index], requested_mode, executor, budget, band, substitution, gaps, placement
-            )
+        results[index] = align_pair_host(firsts[index], seconds[index], requested_mode, budget, substitution, gaps)
     return results
 
 
@@ -788,6 +814,7 @@ def PyInit_affinegaps_mojo() abi("C") -> PythonObject:
         builder.def_function[colorize_alignment]("colorize_alignment")
         builder.def_function[sankoff_cofold]("sankoff_cofold")
         builder.def_function[zuker_fold]("zuker_fold")
+        builder.def_function[gpu_specs]("gpu_specs")
         return builder.finalize()
     except error:
         abort(String("Failed to initialize affinegaps_mojo: ", error))

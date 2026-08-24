@@ -147,6 +147,20 @@ class Placement:
             raise ValueError("A parallel region needs at least one thread.")
 
 
+@dataclass(frozen=True)
+class GpuSpecs:
+    """What one accelerator reports about itself, asked once when a scope opens."""
+
+    shared_memory_per_multiprocessor: int
+    """Bytes of shared memory one multiprocessor holds, which is what bounds a strip's carry."""
+    reserved_memory_per_block: int
+    """The slice of that the driver keeps, measured on this target rather than reported by it."""
+    largest_allocation: int
+    """The biggest single buffer this device hands out, which is `maxBufferLength` on Metal."""
+    streaming_multiprocessors: int
+    """How many multiprocessors a grid has to fill."""
+
+
 default_proteins_alphabet: str = "ARNDCQEGHILKMFPSTWYVBZX"
 """The twenty-three protein letters BLOSUM62 is tabulated over."""
 

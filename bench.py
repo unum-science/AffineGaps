@@ -906,13 +906,16 @@ def main() -> int:
     backend, device = Backend(options.backend), Device(options.device)
 
     def fold_one(sequence: str) -> str:
+        """One structure, which is what every rung of the folding ladder is rated on."""
         return affinegaps.zuker_fold(sequence, backend=backend, device=device)[0]
 
-    def cofold_two(first: str, second: str):
+    def cofold_two(first: str, second: str) -> tuple[str, str, str, int]:
+        """One aligned pair and the structure they agree on, both reconstructed."""
         return affinegaps.sankoff_cofold(first, second, backend=backend, device=device)
 
-    def align_two(first: str, second: str) -> int:
-        return affinegaps.needleman_wunsch_gotoh_score(first, second, backend=backend, device=device)
+    def align_two(first: str, second: str) -> tuple[str, str, int]:
+        """One aligned pair, reconstructed, because a traceback is what the rivals are timed on."""
+        return affinegaps.needleman_wunsch_gotoh_alignment(first, second, backend=backend, device=device)
 
     report: dict = {
         "seed": options.seed,

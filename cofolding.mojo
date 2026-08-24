@@ -34,12 +34,12 @@ from std.gpu import block_idx, thread_idx
 from std.math import ceildiv
 from std.gpu.primitives.warp import WARP_SIZE, max as warp_max
 
-from max.gpu.host import DeviceContext
 
 from errors import AffineGapsError, ErrorKind
 from common import (
     CLOSE_BYTE,
     DEFAULT_RNA_ALPHABET,
+    DeviceScope,
     GAP_BYTE,
     NEGATIVE_INFINITY,
     OPEN_BYTE,
@@ -685,7 +685,7 @@ def cofold_anti_diagonal_kernel(
 
 
 def device_cofold_table(
-    ctx: DeviceContext,
+    scope: DeviceScope,
     first: ImmSpan[Scalar[SymbolDType], _],
     second: ImmSpan[Scalar[SymbolDType], _],
     substitutions: ImmSpan[Scalar[SubstitutionDType], _],
@@ -702,16 +702,16 @@ def device_cofold_table(
     var partners_second = partner_index(second, pairs, alphabet_size)
     var plan = anti_diagonal_plan(rows, columns)
 
-    var first_buffer = upload[SymbolDType](ctx, first)
-    var second_buffer = upload[SymbolDType](ctx, second)
-    var substitutions_buffer = upload[SubstitutionDType](ctx, substitutions)
-    var pairs_buffer = upload[SubstitutionDType](ctx, pairs)
-    var positions_first_buffer = upload[PositionDType](ctx, Span(partners_first.positions))
-    var bounds_first_buffer = upload[PositionDType](ctx, Span(partners_first.bounds))
-    var positions_second_buffer = upload[PositionDType](ctx, Span(partners_second.positions))
-    var bounds_second_buffer = upload[PositionDType](ctx, Span(partners_second.bounds))
-    var offsets_buffer = upload[PositionDType](ctx, Span(plan.offsets))
-    var table_buffer = zeroed[CellDType](ctx, cells)
+    var first_buffer = upload[SymbolDType](scope, first)
+    var second_buffer = upload[SymbolDType](scope, second)
+    var substitutions_buffer = upload[SubstitutionDType](scope, substitutions)
+    var pairs_buffer = upload[SubstitutionDType](scope, pairs)
+    var positions_first_buffer = upload[PositionDType](scope, Span(partners_first.positions))
+    var bounds_first_buffer = upload[PositionDType](scope, Span(partners_first.bounds))
+    var positions_second_buffer = upload[PositionDType](scope, Span(partners_second.positions))
+    var bounds_second_buffer = upload[PositionDType](scope, Span(partners_second.bounds))
+    var offsets_buffer = upload[PositionDType](scope, Span(plan.offsets))
+    var table_buffer = zeroed[CellDType](scope, cells)
 
     for anti_diagonal in range(rows + columns + 1):
         var smallest = max(0, anti_diagonal - columns)
@@ -719,7 +719,7 @@ def device_cofold_table(
         var layer = anti_diagonal_cells(plan, anti_diagonal, span)
         if layer == 0:
             continue
-        ctx.enqueue_function[cofold_anti_diagonal_kernel](
+        scope.context.enqueue_function[cofold_anti_diagonal_kernel](
             first_buffer.unsafe_ptr(),
             second_buffer.unsafe_ptr(),
             substitutions_buffer.unsafe_ptr(),
@@ -741,7 +741,7 @@ def device_cofold_table(
             grid_dim=ceildiv(layer, WARPS_PER_BLOCK),
             block_dim=THREADS_PER_BLOCK,
         )
-    ctx.synchronize()
+    scope.context.synchronize()
 
     # The copy overwrites every byte, so filling this first is a memset of the whole footprint.
     var table = List[Scalar[CellDType]](unsafe_uninit_length=cells)
@@ -749,8 +749,8 @@ def device_cofold_table(
     The whole table comes back because the traceback walks arbitrary cells of it. Copying element by element costs
     more than the sweep at any interesting size, so this is one move.
     """
-    ctx.enqueue_copy(table.unsafe_ptr(), table_buffer)
-    ctx.synchronize()
+    scope.context.enqueue_copy(table.unsafe_ptr(), table_buffer)
+    scope.context.synchronize()
     return table^
 
 
@@ -1092,7 +1092,7 @@ def serial_cofold(
 
 
 def device_cofold(
-    ctx: DeviceContext,
+    scope: DeviceScope,
     first_text: String,
     second_text: String,
     alphabet: String,
@@ -1110,7 +1110,7 @@ def device_cofold(
     var substitutions = uniform_matrix(alphabet.byte_length(), match_score, mismatch_score)
     var pairs = default_rna_pair_matrix()
     var table = device_cofold_table(
-        ctx, Span(first), Span(second), Span(substitutions), Span(pairs), alphabet.byte_length(), scoring
+        scope, Span(first), Span(second), Span(substitutions), Span(pairs), alphabet.byte_length(), scoring
     )
     return cofold_from_table(
         Span(table), Span(first), Span(second), Span(substitutions), Span(pairs), alphabet, scoring

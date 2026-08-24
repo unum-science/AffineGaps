@@ -74,6 +74,7 @@ from common import (
     AffineGapCosts,
     Backend,
     Device,
+    GpuSpecs,
     Placement,
     SubstitutionCosts,
     TabulatedSubstitutionCosts,
@@ -92,6 +93,7 @@ __all__ = [
     "AffineGapCosts",
     "Backend",
     "Device",
+    "GpuSpecs",
     "TabulatedSubstitutionCosts",
     "UniformSubstitutionCosts",
     "available",
@@ -100,6 +102,7 @@ __all__ = [
     "default_proteins_matrix",
     "default_rna_alphabet",
     "default_rna_pair_matrix",
+    "gpu_specs",
     "levenshtein_alignment",
     "needleman_wunsch_gotoh_alignment",
     "needleman_wunsch_gotoh_alignments",
@@ -209,6 +212,21 @@ def available(backend: Backend = Backend.MOJO, device: Device = Device.CPU) -> b
     except Exception:
         return False
     return True
+
+
+def gpu_specs(gpu_id: int = 0) -> GpuSpecs | None:
+    """What the named accelerator reports, or `None` where there is no compiled backend to ask.
+
+    The same numbers the compiled router sizes itself from, so a caller can see why a pair took
+    the sweep it took rather than inferring it from the clock.
+    """
+    module = _mojo_backend()
+    if module is None:
+        return None
+    try:
+        return GpuSpecs(*module.gpu_specs(gpu_id))
+    except Exception:
+        return None
 
 
 def _callable_for(function, backend) -> Any:

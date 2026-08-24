@@ -222,8 +222,17 @@ sankoff_cofold(first, second, backend="mojo", device="gpu")
 Unspecified adapts; specified is honoured or refused.
 Asking for a backend that is not built raises rather than quietly running something else, so a measurement can never report the GPU while timing the reference.
 
-There is no knob for how the traceback stores its state.
-Below a size threshold it keeps a decision per cell, above it recurses in linear space, and both return an optimal answer — so the choice is cost, never correctness.
+There is no knob for how the traceback stores its state, nor for which sweep serves a pair.
+Below a size threshold the traceback keeps a decision per cell, above it recurses in linear space; a pair short enough for one block's shared memory takes the banded sweep, and a taller one tiles over global memory instead.
+Both choices are cost rather than correctness, and both are settled from what the card reports rather than from whatever architecture the kernels were built for, so one artifact serves every accelerator it is run on.
+
+`gpu_specs` reports the numbers behind them.
+
+```python
+affinegaps.gpu_specs()
+> GpuSpecs(shared_memory_per_multiprocessor=233472, reserved_memory_per_block=1024,
+>          largest_allocation=85028372480, streaming_multiprocessors=132)
+```
 
 ### Aligning Two Sequences
 

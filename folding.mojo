@@ -28,12 +28,12 @@ from std.memory.pointer import AddressSpace
 from max.gpu import barrier
 from std.math import log
 
-from max.gpu.host import DeviceContext
 
 from errors import AffineGapsError, ErrorKind
 from common import (
     CLOSE_BYTE,
     DEFAULT_RNA_ALPHABET,
+    DeviceScope,
     OPEN_BYTE,
     SymbolDType,
     THREADS_PER_BLOCK,
@@ -862,7 +862,7 @@ def branching_kernel(
 
 
 def device_fold_tables(
-    ctx: DeviceContext, sequence: ImmSpan[Scalar[SymbolDType], _], energy_model: ImmSpan[Scalar[EnergyDType], _]
+    scope: DeviceScope, sequence: ImmSpan[Scalar[SymbolDType], _], energy_model: ImmSpan[Scalar[EnergyDType], _]
 ) raises -> FoldTables:
     """Sweeps the four tables on the device, two launches per window.
 
@@ -873,18 +873,18 @@ def device_fold_tables(
     var cells = (sequence_length + 1) * (sequence_length + 2)
     var runs = partner_runs(sequence, energy_model, RNA_ALPHABET_SIZE)
 
-    var sequence_buffer = upload[SymbolDType](ctx, sequence)
-    var energy_model_buffer = upload[EnergyDType](ctx, energy_model)
-    var positions_buffer = upload[PositionDType](ctx, Span(runs.positions))
-    var bounds_buffer = upload[PositionDType](ctx, Span(runs.bounds))
-    var paired_buffer = filled[EnergyDType](ctx, cells, FORBIDDEN)
-    var multiloop_buffer = filled[EnergyDType](ctx, cells, FORBIDDEN)
-    var closable_buffer = filled[EnergyDType](ctx, cells, FORBIDDEN)
-    var exterior_buffer = zeroed[EnergyDType](ctx, sequence_length + 2)
-    var branch_buffer = filled[EnergyDType](ctx, cells, FORBIDDEN)
+    var sequence_buffer = upload[SymbolDType](scope, sequence)
+    var energy_model_buffer = upload[EnergyDType](scope, energy_model)
+    var positions_buffer = upload[PositionDType](scope, Span(runs.positions))
+    var bounds_buffer = upload[PositionDType](scope, Span(runs.bounds))
+    var paired_buffer = filled[EnergyDType](scope, cells, FORBIDDEN)
+    var multiloop_buffer = filled[EnergyDType](scope, cells, FORBIDDEN)
+    var closable_buffer = filled[EnergyDType](scope, cells, FORBIDDEN)
+    var exterior_buffer = zeroed[EnergyDType](scope, sequence_length + 2)
+    var branch_buffer = filled[EnergyDType](scope, cells, FORBIDDEN)
 
     for window in range(1, sequence_length + 1):
-        ctx.enqueue_function[paired_kernel](
+        scope.context.enqueue_function[paired_kernel](
             sequence_buffer.unsafe_ptr(),
             energy_model_buffer.unsafe_ptr(),
             paired_buffer.unsafe_ptr(),
@@ -895,7 +895,7 @@ def device_fold_tables(
             grid_dim=sequence_length - window + 1,
             block_dim=THREADS_PER_BLOCK,
         )
-        ctx.enqueue_function[branching_kernel](
+        scope.context.enqueue_function[branching_kernel](
             sequence_buffer.unsafe_ptr(),
             branch_buffer.unsafe_ptr(),
             multiloop_buffer.unsafe_ptr(),
@@ -908,18 +908,18 @@ def device_fold_tables(
             grid_dim=(sequence_length - window + 1, 3),
             block_dim=THREADS_PER_BLOCK,
         )
-    ctx.synchronize()
+    scope.context.synchronize()
 
     # The copy overwrites every byte, so filling these first is a memset of the whole footprint.
     var paired = List[Scalar[EnergyDType]](unsafe_uninit_length=cells)
     var multiloop = List[Scalar[EnergyDType]](unsafe_uninit_length=cells)
     var closable = List[Scalar[EnergyDType]](unsafe_uninit_length=cells)
     var exterior = List[Scalar[EnergyDType]](unsafe_uninit_length=sequence_length + 2)
-    ctx.enqueue_copy(paired.unsafe_ptr(), paired_buffer)
-    ctx.enqueue_copy(multiloop.unsafe_ptr(), multiloop_buffer)
-    ctx.enqueue_copy(closable.unsafe_ptr(), closable_buffer)
-    ctx.enqueue_copy(exterior.unsafe_ptr(), exterior_buffer)
-    ctx.synchronize()
+    scope.context.enqueue_copy(paired.unsafe_ptr(), paired_buffer)
+    scope.context.enqueue_copy(multiloop.unsafe_ptr(), multiloop_buffer)
+    scope.context.enqueue_copy(closable.unsafe_ptr(), closable_buffer)
+    scope.context.enqueue_copy(exterior.unsafe_ptr(), exterior_buffer)
+    scope.context.synchronize()
     return FoldTables(paired^, multiloop^, closable^, exterior^)
 
 
@@ -1192,7 +1192,7 @@ def serial_fold(sequence_text: String) raises -> FoldResult:
     return FoldResult(structure^, energy)
 
 
-def device_fold(ctx: DeviceContext, sequence_text: String) raises -> FoldResult:
+def device_fold(scope: DeviceScope, sequence_text: String) raises -> FoldResult:
     """Folds one RNA sequence with the sweep on the device and the walk on the host.
 
     Traceback stays on the host because it is a serial walk over tables the device already filled,
@@ -1201,7 +1201,7 @@ def device_fold(ctx: DeviceContext, sequence_text: String) raises -> FoldResult:
     var alphabet = String(DEFAULT_RNA_ALPHABET)
     var sequence = translate(sequence_text, alphabet)
     var energy_model = packed_energy_model()
-    var folded = device_fold_tables(ctx, Span(sequence), Span(energy_model))
+    var folded = device_fold_tables(scope, Span(sequence), Span(energy_model))
     var energy = folded.exterior[0]
     var structure = fold_traceback(Span(sequence), Span(energy_model), folded)
     return FoldResult(structure^, energy)
