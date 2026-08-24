@@ -580,7 +580,9 @@ class GpuActivity:
 
 
 def _nvidia_query(fields: str) -> list[str]:
-    """One `nvidia-smi` query, as the rows it printed."""
+    """One `nvidia-smi` query, as the rows it printed, and nothing where the card is not an NVIDIA one."""
+    if shutil.which("nvidia-smi") is None:
+        return []
     result = subprocess.run(
         ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
         capture_output=True,
@@ -590,7 +592,9 @@ def _nvidia_query(fields: str) -> list[str]:
 
 
 def foreign_gpu_processes() -> list[str]:
-    """Compute processes on the card that are not this one."""
+    """Compute processes on the card that are not this one, unanswerable off NVIDIA."""
+    if shutil.which("nvidia-smi") is None:
+        return []
     result = subprocess.run(
         ["nvidia-smi", "--query-compute-apps=pid,used_memory,process_name", "--format=csv,noheader"],
         capture_output=True,

@@ -18,6 +18,16 @@ import tempfile
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
+# The loaders differ in these three and nothing else, so nothing below asks which platform it is on.
+if sys.platform == "darwin":
+    extension_suffix = "dylib"
+    list_linkage = ["otool", "-L"]
+    set_search_path = ["install_name_tool", "-add_rpath", "@loader_path"]
+else:
+    extension_suffix = "so"
+    list_linkage = ["ldd"]
+    set_search_path = ["patchelf", "--set-rpath", "$ORIGIN"]
+
 
 class MojoExtensionHook(BuildHookInterface):
     PLUGIN_NAME = "mojo"
@@ -30,9 +40,13 @@ class MojoExtensionHook(BuildHookInterface):
 
         source = pathlib.Path(self.root) / "affinegaps.mojo"
         staging = pathlib.Path(tempfile.mkdtemp(prefix="affinegaps-"))
-        extension = staging / self._extension_name()
+        extension = staging / f"affinegaps_mojo.{extension_suffix}"
         outcome = subprocess_run_mojo(["build", str(source), "--emit", "shared-lib", "-o", str(extension)])
         if outcome.returncode != 0 or not extension.exists():
+            return
+
+        # An unbundled extension installs and then fails to import, so ship the reference instead.
+        if not self._loader_tools_present():
             return
 
         bundled = [extension, *self._bundle_runtime(extension, staging)]
@@ -51,8 +65,9 @@ class MojoExtensionHook(BuildHookInterface):
         return next(tag.platform for tag in sys_tags())
 
     @staticmethod
-    def _extension_name() -> str:
-        return "affinegaps_mojo.dylib" if sys.platform == "darwin" else "affinegaps_mojo.so"
+    def _loader_tools_present() -> bool:
+        """Whether both loader tools resolve, since bundling has to read the linkage and rewrite it."""
+        return all(shutil.which(argv[0]) is not None for argv in (list_linkage, set_search_path))
 
     @staticmethod
     def _bundle_runtime(extension: pathlib.Path, staging: pathlib.Path) -> list:
@@ -61,27 +76,16 @@ class MojoExtensionHook(BuildHookInterface):
         They are discovered by asking the loader rather than hardcoded, so a release that renames
         them does not silently produce a wheel that cannot import.
         """
+        listing = subprocess.run([*list_linkage, str(extension)], capture_output=True, text=True)
         copied = []
-        if sys.platform == "darwin":
-            listing = subprocess.run(["otool", "-L", str(extension)], capture_output=True, text=True)
-            candidates = [line.split()[0] for line in listing.stdout.splitlines()[1:] if line.strip()]
-        else:
-            listing = subprocess.run(["ldd", str(extension)], capture_output=True, text=True)
-            candidates = [
-                line.partition("=>")[2].partition(" (")[0].strip()
-                for line in listing.stdout.splitlines()
-                if "=>" in line
-            ]
-        for candidate in candidates:
-            path = pathlib.Path(candidate)
-            if path.is_file() and "modular" in path.parts:
+        for token in dict.fromkeys(listing.stdout.split()):
+            path = pathlib.Path(token)
+            if path.is_absolute() and path.is_file() and "modular" in path.parts:
                 copied.append(pathlib.Path(shutil.copy2(path, staging / path.name)))
         return copied
 
     @staticmethod
     def _repoint(library: pathlib.Path) -> None:
         """Points the library at whatever directory it ends up installed in."""
-        if sys.platform == "darwin":
-            subprocess.run(["install_name_tool", "-add_rpath", "@loader_path", str(library)], check=False)
-        else:
-            subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", str(library)], check=False)
+        # An rpath that is already recorded exits non-zero, which is not a failure.
+        subprocess.run([*set_search_path, str(library)], check=False)

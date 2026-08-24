@@ -78,13 +78,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Apple silicon carries no NVIDIA device, so macOS builds the host kernels alone.
+        # Apple silicon has Metal rather than CUDA, and every Metal target Mojo offers needs macOS 26.
         include:
           - {os: ubuntu-24.04, target: sm_90a, accelerator: --target-accelerator sm_90a}
           - {os: ubuntu-24.04, target: sm_100a, accelerator: --target-accelerator sm_100a}
           - {os: ubuntu-24.04-arm, target: sm_90a, accelerator: --target-accelerator sm_90a}
           - {os: ubuntu-24.04-arm, target: sm_100a, accelerator: --target-accelerator sm_100a}
-          - {os: macos-14, target: host, accelerator: ""}
+          - {os: macos-26, target: metal, accelerator: ""}
     env:
       MOJO_ACCELERATOR: ${{ matrix.accelerator }}
     steps:
