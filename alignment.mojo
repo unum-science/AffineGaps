@@ -2020,7 +2020,8 @@ def tiled_sweep_kernel[
                 unsafe_offset=corner_base + (Int(tile_anti_diagonal) % 3) * corner_rows + tile_row
             ]
     else:
-        var column = column_begin + first_column
+        # Clamped as the frontier reads above are: a lane owning no columns must not read past them.
+        var column = column_begin + min(first_column, width_span - 1)
         if local and row_begin == 0:
             above_left_carry = 0
         elif row_begin == 0:

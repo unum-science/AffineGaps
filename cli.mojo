@@ -14,7 +14,7 @@ binary is the compiled backend and so has no `--backend` to choose one.
 
 from std.ffi import c_int, external_call
 from std.io import FileDescriptor
-from std.sys import argv
+from std.sys import argv, exit
 from std.time import perf_counter_ns
 
 from max.gpu.host import DeviceContext
@@ -352,10 +352,13 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
         if index + 1 >= len(arguments):
             raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs a value"))
         var number = parse_int(value)
+        var numeric = flag == "--open" or flag == "--extend" or flag == "--match" or flag == "--mismatch"
+        if (numeric or flag == "--threads") and not number:
+            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs an integer [", value, "]"))
         if flag == "--open":
-            opening = number.or_else(opening)
+            opening = number.value()
         elif flag == "--extend":
-            extension = number.or_else(extension)
+            extension = number.value()
         elif flag == "--match":
             match_score = number
         elif flag == "--mismatch":
@@ -504,12 +507,15 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
         if index + 1 >= len(arguments):
             raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs a value"))
         var number = parse_int(value)
+        var numeric = flag == "--match" or flag == "--mismatch" or flag == "--gap"
+        if numeric and not number:
+            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs an integer [", value, "]"))
         if flag == "--match":
-            match_score = number.or_else(match_score)
+            match_score = number.value()
         elif flag == "--mismatch":
-            mismatch_score = number.or_else(mismatch_score)
+            mismatch_score = number.value()
         elif flag == "--gap":
-            gap = number.or_else(gap)
+            gap = number.value()
         else:
             raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, flag)
         index += 2
@@ -563,12 +569,16 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
 # endregion Verbs
 
 
-def main() raises:
-    """Selects a verb and runs it, or prints the verb list."""
+def main():
+    """Selects a verb and runs it, or prints the verb list.
+
+    The status a verb computes becomes the process status, and a raised error prints to stderr, so
+    a shell can branch on either and a piped payload stays parseable.
+    """
     var given = argv()
     if len(given) < 2:
         print(USAGE, file=FileDescriptor(2))
-        return
+        exit(2)
 
     var verb = String(given[1])
     if verb == "--help":
@@ -580,11 +590,19 @@ def main() raises:
         rest.append(String(given[index]))
 
     var options = Options.default()
-    if verb == "align":
-        _ = run_align(rest, options)
-    elif verb == "fold":
-        _ = run_fold(rest, options)
-    elif verb == "cofold":
-        _ = run_cofold(rest, options)
-    else:
-        print(USAGE, file=FileDescriptor(2))
+    var status = 0
+    try:
+        if verb == "align":
+            status = run_align(rest, options)
+        elif verb == "fold":
+            status = run_fold(rest, options)
+        elif verb == "cofold":
+            status = run_cofold(rest, options)
+        else:
+            print(USAGE, file=FileDescriptor(2))
+            status = 2
+    except error:
+        print(String("Error: ", error), file=FileDescriptor(2))
+        status = 1
+    if status != 0:
+        exit(status)
