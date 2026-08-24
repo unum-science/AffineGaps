@@ -39,11 +39,14 @@ from seqfold import dot_bracket, fold as seqfold_fold
 import affinegaps
 import cofolding
 import folding
-from common import Backend, Device
+from common import Backend, Device, default_proteins_alphabet
 from turner import PAIR_INDEX
 
 default_alphabet = "ACGU"
 """The four RNA bases, ordered so a base doubles as its own index."""
+
+default_residues = default_proteins_alphabet[:20]
+"""The twenty unambiguous residues, which is what a random protein pair is drawn from."""
 
 default_archive_root = Path("data/archive-ii")
 """Where the corpus is reached from, as a symlink onto the shared filesystem."""
@@ -628,7 +631,11 @@ def measure_when_idle(policy: GpuPolicy, call, attempts: int = 3):
 
 
 def require_idle_gpu(policy: GpuPolicy, *, utilization_ceiling: int = 10) -> None:
-    """Refuses to measure a card somebody else is using, because a shared clock is not a result."""
+    """Refuses to measure a card somebody else is using, because a shared clock is not a result.
+
+    Metal keeps no per-process compute census, so on Apple silicon the two probes below stay silent
+    and the guard passes rather than pretending it looked.
+    """
     if policy is GpuPolicy.SHARE:
         return
     intruders = foreign_gpu_processes()
@@ -664,19 +671,18 @@ def ramp_clocks(fold_one, seconds: float = 10.0) -> int:
 def sample_activity(call, seconds_hint: float) -> tuple[float, GpuActivity | None]:
     """Times one call while DCGM watches the card, so a number arrives with its own witness."""
     fields = "1002,1003,1005,155,100"  # SM activity, occupancy, DRAM activity, power, SM clock
-    sampler = None
-    if shutil.which("dcgmi") is not None and seconds_hint > 0.2:
-        sampler = subprocess.Popen(
-            ["dcgmi", "dmon", "-e", fields, "-d", "100"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
+    # Without a sampler the rung would run a second time to be watched by nobody.
+    if shutil.which("dcgmi") is None or seconds_hint <= 0.2:
+        return 0.0, None
+    sampler = subprocess.Popen(
+        ["dcgmi", "dmon", "-e", fields, "-d", "100"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
     started = time.perf_counter()
     call()
     elapsed = time.perf_counter() - started
-    if sampler is None:
-        return elapsed, None
     sampler.terminate()
     readings = []
     for line in (sampler.stdout.read() if sampler.stdout else "").splitlines():
@@ -747,6 +753,15 @@ def folding_candidates(sequence: str) -> int:
     return interior + 2 * _partner_visits(closing) + int(closing.sum())
 
 
+def alignment_candidates(first: str, second: str) -> int:
+    """Innermost evaluations one Gotoh sweep performs, which is one cell per position pair.
+
+    Alone among the three this is the table itself: an affine cell settles its three states from
+    fixed neighbours rather than scanning a range, so there is nothing to weigh a cell by.
+    """
+    return len(first) * len(second)
+
+
 def cofolding_candidates(first: str, second: str) -> int:
     """Innermost evaluations one Sankoff sweep performs, which is one partner pair per candidate.
 
@@ -781,8 +796,12 @@ def _timed(call, repeats: int) -> float:
     return best
 
 
-def sweep_cofolding_speed(options, cofold_two, fold_one) -> dict:
-    """Times the Sankoff sweep across a ladder of lengths, on a card nobody else is using."""
+def sweep_pair_speed(options, pair_call, count_candidates, alphabet, fold_one) -> dict:
+    """Times a two-sequence recurrence across a ladder of lengths, on a card nobody else is using.
+
+    Sankoff and Gotoh differ only in what they draw from and how a rung is rated, so they share the
+    ladder rather than each keeping a copy of it.
+    """
     require_idle_gpu(options.gpu_policy)
     settled = ramp_clocks(fold_one) if options.device == "gpu" else 0
     if settled:
@@ -790,12 +809,12 @@ def sweep_cofolding_speed(options, cofold_two, fold_one) -> dict:
     generator = random.Random(options.seed)
     rows = []
     for length in options.lengths:
-        first = "".join(generator.choice(default_alphabet) for _ in range(length))
-        second = "".join(generator.choice(default_alphabet) for _ in range(length))
-        candidates = cofolding_candidates(first, second)
-        rung = partial(_timed, partial(cofold_two, first, second), options.repeats)
+        first = "".join(generator.choice(alphabet) for _ in range(length))
+        second = "".join(generator.choice(alphabet) for _ in range(length))
+        candidates = count_candidates(first, second)
+        rung = partial(_timed, partial(pair_call, first, second), options.repeats)
         taken = measure_when_idle(options.gpu_policy, rung)
-        _, activity = sample_activity(partial(cofold_two, first, second), taken)
+        _, activity = sample_activity(partial(pair_call, first, second), taken)
         row = {"length": length, "candidates": candidates, "affinegaps": taken}
         shown = [
             f"length={length}",
@@ -877,7 +896,7 @@ def main() -> int:
     parser.add_argument("--skip-folding", action="store_true")
     parser.add_argument("--skip-rivals", action="store_true")
     parser.add_argument("--gpu-policy", type=GpuPolicy, choices=list(GpuPolicy), default=GpuPolicy.REQUIRE_IDLE)
-    parser.add_argument("--recurrence", default="folding", choices=("folding", "cofolding"))
+    parser.add_argument("--recurrence", default="folding", choices=("folding", "cofolding", "alignment"))
     # Its cost grows near the fourth power, so it leaves the ladder long before the others do.
     parser.add_argument("--seqfold-limit", type=int, default=2048)
     parser.add_argument("--output", type=Path)
@@ -892,6 +911,9 @@ def main() -> int:
     def cofold_two(first: str, second: str):
         return affinegaps.sankoff_cofold(first, second, backend=backend, device=device)
 
+    def align_two(first: str, second: str) -> int:
+        return affinegaps.needleman_wunsch_gotoh_score(first, second, backend=backend, device=device)
+
     report: dict = {
         "seed": options.seed,
         "backend": f"{options.backend}-{options.device}",
@@ -902,7 +924,9 @@ def main() -> int:
     }
     if options.mode == "speed":
         if options.recurrence == "cofolding":
-            report |= sweep_cofolding_speed(options, cofold_two, fold_one)
+            report |= sweep_pair_speed(options, cofold_two, cofolding_candidates, default_alphabet, fold_one)
+        elif options.recurrence == "alignment":
+            report |= sweep_pair_speed(options, align_two, alignment_candidates, default_residues, fold_one)
         else:
             report |= sweep_speed(options, fold_one)
     else:
