@@ -261,7 +261,8 @@ def hairpin_energy(
         return FORBIDDEN
     var tabulated = special_hairpin(sequence, energy_model, start, end, size)
     if tabulated < FORBIDDEN:
-        return tabulated
+        # Tabulated with the helix end factored out, as the mismatch tables are.
+        return tabulated + helix_end_penalty(pair)
     var initiation = energy_model[unsafe_offset=HAIRPIN_OFFSET + min(size, LOOP_LIMIT)]
     if size > LOOP_LIMIT:
         # Beyond the tabulated sizes the model extrapolates by polymer theory, which needs a logarithm; capping

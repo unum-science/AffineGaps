@@ -142,7 +142,8 @@ def _hairpin_energy(sequence: np.ndarray, start: int, end: int) -> int:
         return FORBIDDEN
     tabulated = _special_hairpin(sequence, start, end, size)
     if tabulated < FORBIDDEN:
-        return tabulated
+        # Tabulated with the helix end factored out, as the mismatch tables are.
+        return tabulated + _helix_end_penalty(pair)
     if size <= LOOP_LIMIT:
         initiation = HAIRPIN_INITIATION[size]
     else:
