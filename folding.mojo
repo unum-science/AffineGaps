@@ -38,6 +38,7 @@ from common import (
     SymbolDType,
     THREADS_PER_BLOCK,
     UNPAIRED_BYTE,
+    filled,
     translate,
     upload,
     zeroed,
@@ -876,15 +877,11 @@ def device_fold_tables(
     var energy_model_buffer = upload[EnergyDType](ctx, energy_model)
     var positions_buffer = upload[PositionDType](ctx, Span(runs.positions))
     var bounds_buffer = upload[PositionDType](ctx, Span(runs.bounds))
-    var paired_buffer = ctx.enqueue_create_buffer[EnergyDType](cells)
-    var multiloop_buffer = ctx.enqueue_create_buffer[EnergyDType](cells)
-    var closable_buffer = ctx.enqueue_create_buffer[EnergyDType](cells)
+    var paired_buffer = filled[EnergyDType](ctx, cells, FORBIDDEN)
+    var multiloop_buffer = filled[EnergyDType](ctx, cells, FORBIDDEN)
+    var closable_buffer = filled[EnergyDType](ctx, cells, FORBIDDEN)
     var exterior_buffer = zeroed[EnergyDType](ctx, sequence_length + 2)
-    var branch_buffer = ctx.enqueue_create_buffer[EnergyDType](cells)
-    ctx.enqueue_memset(paired_buffer, FORBIDDEN)
-    ctx.enqueue_memset(multiloop_buffer, FORBIDDEN)
-    ctx.enqueue_memset(closable_buffer, FORBIDDEN)
-    ctx.enqueue_memset(branch_buffer, FORBIDDEN)
+    var branch_buffer = filled[EnergyDType](ctx, cells, FORBIDDEN)
 
     for window in range(1, sequence_length + 1):
         ctx.enqueue_function[paired_kernel](

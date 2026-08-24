@@ -31,7 +31,7 @@ from std.sys.info import size_of
 
 from max.algorithm import parallelize
 from max.gpu import barrier
-from max.gpu.host import DeviceBuffer, DeviceContext, FuncAttribute
+from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext, FuncAttribute
 from max.gpu.memory import external_memory
 
 from errors import AffineGapsError, ErrorKind
@@ -41,11 +41,12 @@ from common import (
     NEGATIVE_INFINITY,
     OffsetDType,
     Placement,
+    SHARED_RESERVED,
     ScoreDType,
     SubstitutionDType,
     SymbolDType,
     THREADS_PER_BLOCK,
-    max_dynamic_shared,
+    allocate,
     translate,
     upload,
     zeroed,
@@ -60,26 +61,47 @@ comptime ALL_MODES = (AlignmentMode.GLOBAL, AlignmentMode.LOCAL)
 comptime DEFAULT_GAP_OPENING = Int32(-20)
 comptime DEFAULT_GAP_EXTENSION = Int32(-1)
 
-comptime BLOCKS_PER_MULTIPROCESSOR = 4
-"""
-How many blocks should stay resident per multiprocessor. This is the knob; the band capacity below follows from it and
-from the device, rather than being guessed. Four is chosen because a batch has to carry more than nine hundred pairs
-before occupancy stops being bound by batch size on a hundred-and-thirty-two-multiprocessor device, so a longer reach
-is usually free.
-"""
-
 comptime CORNER_BYTES = 16
 """One aligned slot for the corner score the walk reads, which is all the strip stages beyond its table."""
 comptime STATIC_SHARED_USED = MAX_ALPHABET_SIZE * MAX_ALPHABET_SIZE + CORNER_BYTES
 
-comptime MAX_DYNAMIC_SHARED = max_dynamic_shared[BLOCKS_PER_MULTIPROCESSOR]()
 comptime WARPS_PER_BLOCK = THREADS_PER_BLOCK // WARP_SIZE
 comptime CARRY_BANDS = 2
 """
 A strip carries the score and insertion layers of the column to its left, one entry per row, which is what bounds how
 long a first sequence one block can take.
 """
-comptime MAX_BAND_LENGTH = (MAX_DYNAMIC_SHARED - STATIC_SHARED_USED) // (CARRY_BANDS * 4) - 1
+
+
+@fieldwise_init
+struct Space(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """Which sweep serves a pair, which its height decides."""
+
+    var identifier: UInt8
+    """Which case this names."""
+    comptime BANDED = Self(0)
+    """One block per pair, carrying the column to its left in shared memory."""
+    comptime TILED = Self(1)
+    """Tiles over global-memory bands, bounded by nothing."""
+
+
+def band_length(ctx: DeviceContext) raises -> Int:
+    """How many rows one block's carry can index, read from the card rather than the build target.
+
+    `GPUInfo` is a per-architecture table keyed by whatever the kernels were compiled for, so a
+    wheel built against one accelerator would otherwise carry its neighbour's ceiling.
+    """
+    var shared = Int(ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
+    return (shared - SHARED_RESERVED - STATIC_SHARED_USED) // (CARRY_BANDS * 4) - 1
+
+
+def serving_space(rows: Int, band: Int) -> Space:
+    """The one place a pair is measured against what a block can carry.
+
+    The strip kernels index their carry by the first sequence, so height alone decides; the
+    stored-traceback crossover is a throughput choice layered on top of this one.
+    """
+    return Space.BANDED if rows <= band else Space.TILED
 
 
 @fieldwise_init
@@ -195,6 +217,15 @@ struct AffineGapCosts(ImplicitlyCopyable, TrivialRegisterPassable):
     """Charged once when a gap run begins."""
     var extend: Int32
     """Charged for every position the run continues."""
+
+    @staticmethod
+    def checked(open: Int32, extend: Int32) raises AffineGapsError -> Self:
+        """The host's way in. A kernel rebuilds from two launch arguments and cannot raise."""
+        if open > extend:
+            raise AffineGapsError(ErrorKind.INVALID_SCORING, "gap opening cheaper than extension")
+        if extend > 0:
+            raise AffineGapsError(ErrorKind.INVALID_SCORING, "a rewarded gap")
+        return Self(open, extend)
 
 
 @fieldwise_init
@@ -917,9 +948,6 @@ def serial_hirschberg(
     are joined by Myers-Miller: either the path crosses in the match layer, or a deletion run
     straddles the cut, in which case both halves charged an opening and one is refunded.
     """
-    if scoring.open > scoring.extend:
-        raise AffineGapsError(ErrorKind.INVALID_SCORING, "gap opening cheaper than extension")
-
     var columns = window_second_to - window_second_from
     path_columns[window_first_to] = Int32(window_second_to)
 
@@ -1243,9 +1271,9 @@ def device_scores[
     var offsets_buffer = upload(ctx, offsets)
     var substitutions_buffer = upload(ctx, substitutions)
     var results_buffer = zeroed[ScoreDType](ctx, pairs)
-    var unused_symbols = ctx.enqueue_create_buffer[SymbolDType](1)
+    var unused_symbols = allocate[SymbolDType](ctx, 1)
     """A discarding sweep never reads or writes these, but the one kernel still names them."""
-    var unused_changes = ctx.enqueue_create_buffer[ChangeDType](1)
+    var unused_changes = allocate[ChangeDType](ctx, 1)
     var unused_offsets = zeroed[DType.int64](ctx, 1)
     var unused_lengths = zeroed[ScoreDType](ctx, 1)
     var nowhere = unused_symbols.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
@@ -1564,11 +1592,11 @@ def device_alignments[
     for index in range(alphabet_size):
         letters.append(Scalar[SymbolDType](alphabet_bytes[index]))
     var letters_buffer = upload(ctx, letters)
-    var changes_buffer = ctx.enqueue_create_buffer[ChangeDType](Int(max(running, Int64(1))))
+    var changes_buffer = allocate[ChangeDType](ctx, Int(max(running, Int64(1))))
     var change_offsets_buffer = upload(ctx, change_offsets)
     var results_buffer = zeroed[ScoreDType](ctx, pairs)
-    var first_buffer = ctx.enqueue_create_buffer[SymbolDType](max(pairs * widest, 1))
-    var second_buffer = ctx.enqueue_create_buffer[SymbolDType](max(pairs * widest, 1))
+    var first_buffer = allocate[SymbolDType](ctx, max(pairs * widest, 1))
+    var second_buffer = allocate[SymbolDType](ctx, max(pairs * widest, 1))
     var lengths_buffer = zeroed[ScoreDType](ctx, pairs)
 
     ctx.enqueue_function[strip_pair_kernel[mode, Recording.TO_GLOBAL_MEMORY]](
@@ -1638,9 +1666,6 @@ def device_hirschberg(
     by shared memory. Each launch is its own barrier, which is what stands in for the grid-wide sync
     Mojo does not expose.
     """
-    if scoring.open > scoring.extend:
-        raise AffineGapsError(ErrorKind.INVALID_SCORING, "gap opening cheaper than extension")
-
     var rows = len(first)
     """The second sequence is staged after the first, so its indices carry that offset."""
     path_columns[window_first_to] = Int32(window_second_to)
@@ -2164,6 +2189,11 @@ def device_sweep_buffers(
     The column extent is doubled because a frame's forward and reverse halves split its rows but
     both span all of its columns, so one level's sweeps cover the column axis twice.
     """
+    # The sweep stages the whole table into shared memory unchecked, so the bound belongs here,
+    # where every tiled launch passes, rather than in the kernel that cannot raise.
+    if len(substitutions) > MAX_ALPHABET_SIZE * MAX_ALPHABET_SIZE:
+        raise AffineGapsError(ErrorKind.ALPHABET_TOO_LARGE, "staged substitution table")
+
     var frontier_span = 2 * columns + 4 * rows + 32
     var left_span = 5 * rows + 32
     var tile_columns_count = ceildiv(columns, TILE_SIDE) + 2
@@ -2177,16 +2207,16 @@ def device_sweep_buffers(
     var block_slots = min(ceildiv(rows, MIN_TILE_HEIGHT), tile_columns_count) + 4
     """Only a local scan writes here, and that is one sweep, so the grid is one tile-diagonal wide."""
     var buffers = SweepBuffers(
-        ctx.enqueue_create_buffer[SymbolDType](max(rows + columns, 1)),
-        ctx.enqueue_create_buffer[SubstitutionDType](len(substitutions)),
-        ctx.enqueue_create_buffer[ScoreDType](frontier_span),
-        ctx.enqueue_create_buffer[ScoreDType](frontier_span),
-        ctx.enqueue_create_buffer[ScoreDType](frontier_span),
-        ctx.enqueue_create_buffer[ScoreDType](frontier_span),
-        ctx.enqueue_create_buffer[ScoreDType](4 * max(rows, 1)),
-        ctx.enqueue_create_buffer[ScoreDType](left_span),
-        ctx.enqueue_create_buffer[ScoreDType](left_span),
-        ctx.enqueue_create_buffer[ScoreDType](corner_span),
+        allocate[SymbolDType](ctx, max(rows + columns, 1)),
+        allocate[SubstitutionDType](ctx, len(substitutions)),
+        allocate[ScoreDType](ctx, frontier_span),
+        allocate[ScoreDType](ctx, frontier_span),
+        allocate[ScoreDType](ctx, frontier_span),
+        allocate[ScoreDType](ctx, frontier_span),
+        allocate[ScoreDType](ctx, 4 * max(rows, 1)),
+        allocate[ScoreDType](ctx, left_span),
+        allocate[ScoreDType](ctx, left_span),
+        allocate[ScoreDType](ctx, corner_span),
         corner_span,
         left_span,
         frontier_span,
@@ -2425,6 +2455,58 @@ def device_sweep_level[
             block_dim=STRIP_LANES,
         )
     ctx.synchronize()
+
+
+def border_score[mode: AlignmentMode](rows: Int, columns: Int, scoring: AffineGapCosts) -> Int32:
+    """The score of a rectangle with no interior, which no sweep writes a frontier for."""
+    comptime if mode == AlignmentMode.LOCAL:
+        return Int32(0)
+    var span = rows + columns
+    if span == 0:
+        return Int32(0)
+    return scoring.open + Int32(span - 1) * scoring.extend
+
+
+def device_score[
+    mode: AlignmentMode
+](
+    ctx: DeviceContext,
+    first: ImmSpan[Scalar[SymbolDType], _],
+    second: ImmSpan[Scalar[SymbolDType], _],
+    substitutions: ImmSpan[Scalar[SubstitutionDType], _],
+    alphabet_size: Int,
+    scoring: AffineGapCosts,
+) raises -> Int32:
+    """One pair scored on the device in linear space, over global-memory bands and without a band.
+
+    The counterpart of `device_align` for a caller that wants only the number, so a pair too tall
+    for one block's carry is scored rather than refused.
+    """
+    var rows = len(first)
+    var columns = len(second)
+    # Every tile of an empty rectangle returns before writing, and the frontier is never zeroed,
+    # so the borders are computed here rather than read back.
+    if rows == 0 or columns == 0:
+        return border_score[mode](rows, columns, scoring)
+
+    var sequences = List[Scalar[SymbolDType]](capacity=rows + columns)
+    sequences.extend(first)
+    sequences.extend(second)
+    var buffers = device_sweep_buffers(ctx, rows, columns, Span(sequences), substitutions)
+
+    comptime if mode == AlignmentMode.LOCAL:
+        var last_row, last_column, best = device_local_extremum[SweepHalf.FORWARD](
+            ctx, buffers, rows, rows, columns, alphabet_size, scoring
+        )
+        _ = last_row
+        _ = last_column
+        return best
+
+    var sweeps = List[Sweep]()
+    sweeps.append(Sweep(rows, columns, 0, rows, 0, 0, GapRun.OPENS, SweepHalf.FORWARD))
+    device_sweep_level[AlignmentMode.GLOBAL](ctx, buffers, sweeps, alphabet_size, scoring)
+    with buffers.top_scores.map_to_host() as frontier:
+        return frontier[sweeps[0].column_base + columns]
 
 
 def device_align[

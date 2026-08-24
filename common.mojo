@@ -2,15 +2,14 @@
 Primitives shared by every recurrence in this package.
 
 The alignment and folding families have almost nothing in common beyond these: symbol codes, the
-device staging helpers, and the shared-memory budget derived from an occupancy target. Anything
-that presumes a rotating band or an affine gap belongs to `alignment.mojo`, and anything that
-presumes a base pair belongs to `folding.mojo`.
+device staging helpers, and the scoring records every recurrence reads. Anything that presumes a
+rotating band or an affine gap belongs to `alignment.mojo`, and anything that presumes a base pair
+belongs to `folding.mojo`.
 """
 
 from std.ffi import c_int, c_size_t, external_call
-from std.gpu.host.info import GPUInfo
 from std.memory import stack_allocation
-from std.sys.info import CompilationTarget, _accelerator_arch, has_accelerator, num_logical_cores
+from std.sys.info import CompilationTarget, num_logical_cores, size_of
 
 from max.gpu.host import DeviceBuffer, DeviceContext
 
@@ -54,9 +53,6 @@ comptime MAX_ALPHABET_SIZE = 32
 Caps the substitution table staged into shared memory. Thirty-two covers the twenty-three protein letters with room to
 spare, and costs one kilobyte per block.
 """
-
-comptime STATIC_SHARED_LIMIT = 48 * 1024
-"""Bytes a block may hold without opting into the dynamic carve-out."""
 
 comptime SHARED_RESERVED = 1024
 """
@@ -137,25 +133,16 @@ struct Placement(ImplicitlyCopyable, TrivialRegisterPassable):
         return Self.host(hardware_threads())
 
 
-def target_shared_per_multiprocessor[blocks_per_multiprocessor: Int]() -> Int:
-    """Shared memory per multiprocessor on whatever this is being compiled for.
-
-    A `comptime if` elides the untaken branch where a ternary would instantiate both, which is
-    what lets the no-accelerator case avoid naming a device at all: it falls back to the static
-    carve-out limit, and nothing sized from it can run on such a host anyway.
-    """
-    comptime if has_accelerator():
-        return GPUInfo.from_name[_accelerator_arch()]().shared_memory_per_multiprocessor
-    return blocks_per_multiprocessor * STATIC_SHARED_LIMIT
-
-
-def max_dynamic_shared[blocks_per_multiprocessor: Int]() -> Int:
-    """Dynamic shared memory one block may opt into, which is all of it but the driver's reserve."""
-    return target_shared_per_multiprocessor[blocks_per_multiprocessor]() - SHARED_RESERVED
-
-
-def uniform_matrix(alphabet_size: Int, match_score: Int, mismatch_score: Int) -> List[Scalar[SubstitutionDType]]:
-    """Diagonal substitution matrix, the `match`/`mismatch` path of `_validate_gotoh_arguments`."""
+def uniform_matrix(
+    alphabet_size: Int, match_score: Int, mismatch_score: Int
+) raises AffineGapsError -> List[Scalar[SubstitutionDType]]:
+    """Diagonal substitution matrix, refusing scores the table cannot hold rather than wrapping."""
+    comptime lowest = Int(Scalar[SubstitutionDType].MIN)
+    comptime highest = Int(Scalar[SubstitutionDType].MAX)
+    if match_score < lowest or match_score > highest:
+        raise AffineGapsError(ErrorKind.INVALID_SCORING, String("match ", match_score))
+    if mismatch_score < lowest or mismatch_score > highest:
+        raise AffineGapsError(ErrorKind.INVALID_SCORING, String("mismatch ", mismatch_score))
     var matrix = List[Scalar[SubstitutionDType]](
         length=alphabet_size * alphabet_size, fill=Scalar[SubstitutionDType](mismatch_score)
     )
@@ -181,16 +168,36 @@ def translate(text: String, alphabet: String) raises AffineGapsError -> List[Sca
     return codes^
 
 
+def allocate[dtype: DType](ctx: DeviceContext, count: Int) raises -> DeviceBuffer[dtype]:
+    """The one place a device buffer is created, and so the one place its size is refused.
+
+    A one-element floor keeps an empty batch from being its own case. The bound is the largest
+    contiguous allocation this device reports, which on Metal is a buffer limit well below the
+    card's memory rather than the memory itself.
+    """
+    var elements = max(count, 1)
+    var bytes = elements * size_of[Scalar[dtype]]()
+    var largest = Int(ctx.max_single_alloc_size())
+    if bytes > largest:
+        raise AffineGapsError(ErrorKind.SEQUENCE_TOO_LONG, String(bytes, " bytes over ", largest))
+    return ctx.enqueue_create_buffer[dtype](elements)
+
+
 def upload[dtype: DType](ctx: DeviceContext, values: ImmSpan[Scalar[dtype], _]) raises -> DeviceBuffer[dtype]:
     """Stages values onto the device, keeping a one-element floor so an empty batch is not a case."""
-    var buffer = ctx.enqueue_create_buffer[dtype](max(len(values), 1))
+    var buffer = allocate[dtype](ctx, len(values))
     if len(values) > 0:
         ctx.enqueue_copy(buffer, values)
     return buffer^
 
 
-def zeroed[dtype: DType](ctx: DeviceContext, count: Int) raises -> DeviceBuffer[dtype]:
-    """A device buffer the caller can read before any kernel has written it."""
-    var buffer = ctx.enqueue_create_buffer[dtype](max(count, 1))
-    ctx.enqueue_memset(buffer, Scalar[dtype](0))
+def filled[dtype: DType](ctx: DeviceContext, count: Int, value: Scalar[dtype]) raises -> DeviceBuffer[dtype]:
+    """A device buffer every element of which is `value` before any kernel has written it."""
+    var buffer = allocate[dtype](ctx, count)
+    ctx.enqueue_memset(buffer, value)
     return buffer^
+
+
+def zeroed[dtype: DType](ctx: DeviceContext, count: Int) raises -> DeviceBuffer[dtype]:
+    """The zero fill, which is what a buffer read before it is written usually wants."""
+    return filled[dtype](ctx, count, Scalar[dtype](0))

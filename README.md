@@ -340,7 +340,7 @@ The consolation is that __traceback costs nothing extra__: the whole table is re
 
 Time is $O(n^3 m^3)$ and binds long before memory does, which is what the throughput table above measures.
 The reach covers tRNA, 5S rRNA, microRNA precursors and most riboswitches, and gets expensive immediately after.
-Nothing refuses an oversized request: the table is allocated on the card and again on the host for the traceback walk, so a pair too long to fit fails as an allocation error from the driver rather than as a refusal from this library.
+The table is allocated on the card and again on the host for the traceback walk, and every device buffer is measured against the largest allocation the card reports before it is asked for, so a pair too long to fit is refused with the byte count rather than failing inside the driver.
 For longer sequences the banded approximations remain the right tool; this one exists to be __exact__, and to be the oracle they can be measured against.
 
 ## Using the Command Line

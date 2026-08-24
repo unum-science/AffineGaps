@@ -56,10 +56,12 @@ from affinegaps import (
     needleman_wunsch_gotoh_alignment,
     needleman_wunsch_gotoh_alignments,
     needleman_wunsch_gotoh_score,
+    needleman_wunsch_gotoh_scores,
     sankoff_cofold,
     smith_waterman_gotoh_alignment,
     smith_waterman_gotoh_alignments,
     smith_waterman_gotoh_score,
+    smith_waterman_gotoh_scores,
     zuker_fold,
 )
 
@@ -207,6 +209,11 @@ def batch_aligner_for(mode: str):
 def scorer_for(mode: str):
     """The score-only entry point for a mode."""
     return needleman_wunsch_gotoh_score if mode == "global" else smith_waterman_gotoh_score
+
+
+def batch_scorer_for(mode: str):
+    """The batched score-only entry point for a mode."""
+    return needleman_wunsch_gotoh_scores if mode == "global" else smith_waterman_gotoh_scores
 
 
 def random_pair(shortest: int = 5, longest: int = 25, alphabet: str = default_proteins_alphabet):
@@ -523,6 +530,34 @@ def test_batch_survives_a_pair_the_batch_kernel_cannot_take(compiled_backend, mo
         assert core_first == first if mode == "global" else core_first in first
         assert core_second == second if mode == "global" else core_second in second
         assert rescore(left, right) == score
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_score_survives_a_pair_the_batch_kernel_cannot_take(compiled_backend, mode: str):
+    """Scoring is the cheaper question, so it must not be the more restricted one.
+
+    The same tall pair the alignment path carries has to reach a number here too, and the tiled
+    sweep that carries it must agree with the reference rather than with the batch it left.
+    """
+    tall = ("A" * 40_000, "ACGT" * 4)
+    ordinary = random_pair(20, 60)
+    firsts = [tall[0], ordinary[0]]
+    seconds = [tall[1], ordinary[1]]
+    scorer = scorer_for(mode)
+    produced = batch_scorer_for(mode)(firsts, seconds, **SCORING, **compiled_backend)
+    expected = [scorer(a, b, **SCORING, backend="python") for a, b in zip(firsts, seconds, strict=True)]
+    assert produced == expected
+    assert scorer(*tall, **SCORING, **compiled_backend) == expected[0]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_score_takes_an_empty_side(compiled_backend, mode: str):
+    """A rectangle with no interior writes no frontier, so its borders come from the costs alone."""
+    scorer = scorer_for(mode)
+    for first, second in (("A" * 40_000, ""), ("", "ACGT" * 4), ("", "")):
+        assert scorer(first, second, **SCORING, **compiled_backend) == scorer(
+            first, second, **SCORING, backend="python"
+        )
 
 
 def test_rejects_what_it_cannot_do():

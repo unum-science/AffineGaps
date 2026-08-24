@@ -378,7 +378,7 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
 
     var alphabet = String(DEFAULT_PROTEINS_ALPHABET)
     var alphabet_size = alphabet.byte_length()
-    var scoring = AffineGapCosts(Int32(opening), Int32(extension))
+    var scoring = AffineGapCosts.checked(Int32(opening), Int32(extension))
     var substitutions = default_proteins_matrix() if not match_score else uniform_matrix(
         alphabet_size, match_score.value(), mismatch_score.value()
     )

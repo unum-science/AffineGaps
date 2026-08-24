@@ -62,7 +62,7 @@ from alignment import (
     DEVICE_STORED_CELLS,
     GapRun,
     Layer,
-    MAX_BAND_LENGTH,
+    Space,
     Sweep,
     SweepBuffers,
     SweepHalf,
@@ -70,12 +70,15 @@ from alignment import (
     default_proteins_matrix,
     device_alignments,
     device_align,
+    device_score,
     expand_path,
     serial_hirschberg,
     serial_local_extremum,
     score_path,
     serial_align,
+    band_length,
     serial_score,
+    serving_space,
     device_sweep_level,
     device_scores,
 )
@@ -96,7 +99,7 @@ def scoring_from(gaps: PythonObject) raises -> AffineGapCosts:
     """Reads the two gap penalties off a caller's gap-cost record by name."""
     var opening = optional_int(gaps.open).or_else(Int(DEFAULT_GAP_OPENING))
     var extension = optional_int(gaps.extend).or_else(Int(DEFAULT_GAP_EXTENSION))
-    return AffineGapCosts(Int32(opening), Int32(extension))
+    return AffineGapCosts.checked(Int32(opening), Int32(extension))
 
 
 def matrix_from(substitution: PythonObject, alphabet_size: Int) raises -> List[Scalar[SubstitutionDType]]:
@@ -147,6 +150,31 @@ def gotoh_score[
     return PythonObject(Int(serial_score[mode](left, right, substitutions, alphabet_size, scoring)))
 
 
+def device_band(placement: Placement) raises -> Int:
+    """How many rows the strip kernels can carry on the accelerator this call names."""
+    return band_length(DeviceContext(device_id=placement.gpu_id))
+
+
+def gotoh_score_linear_gpu[
+    mode: AlignmentMode
+](
+    first: PythonObject,
+    second: PythonObject,
+    substitution: PythonObject,
+    gaps: PythonObject,
+    placement: Placement,
+) raises -> PythonObject:
+    """One pair scored with every sweep on the device, for a pair too tall for one block's carry."""
+    var alphabet, alphabet_size, scoring = protein_defaults(gaps)
+    var substitutions = matrix_from(substitution, alphabet_size)
+    var left = translate(String(first), alphabet)
+    var right = translate(String(second), alphabet)
+    var score = device_score[mode](
+        DeviceContext(device_id=placement.gpu_id), left, right, substitutions, alphabet_size, scoring
+    )
+    return PythonObject(Int(score))
+
+
 def gotoh_alignment[
     mode: AlignmentMode
 ](first: PythonObject, second: PythonObject, substitution: PythonObject, gaps: PythonObject,) raises -> PythonObject:
@@ -185,8 +213,6 @@ def pack_batch(firsts: PythonObject, seconds: PythonObject, alphabet: String) ra
     offsets.append(0)
     for index in range(pairs):
         var left = translate(String(firsts[index]), alphabet)
-        if len(left) > MAX_BAND_LENGTH:
-            raise AffineGapsError(ErrorKind.SEQUENCE_TOO_LONG, "shared-memory band")
         sequences.extend(left^)
         offsets.append(Scalar[OffsetDType](len(sequences)))
         var right = translate(String(seconds[index]), alphabet)
@@ -299,7 +325,7 @@ def levenshtein_alignment(first: PythonObject, second: PythonObject) raises -> P
     var alphabet = combined_alphabet(left, right)
     var alphabet_size = alphabet.byte_length()
     var substitutions = uniform_matrix(alphabet_size, 0, -1)
-    var scoring = AffineGapCosts(Int32(-1), Int32(-1))
+    var scoring = AffineGapCosts.checked(Int32(-1), Int32(-1))
     var encoded_left = translate(left, alphabet)
     var encoded_right = translate(right, alphabet)
     var result = serial_align[AlignmentMode.GLOBAL](
@@ -585,20 +611,61 @@ def gotoh_scores(
     substitution: PythonObject,
     gaps: PythonObject,
 ) raises -> PythonObject:
-    """Scores every pair. The score kernels are two-row, so linear space is the only space."""
+    """Scores every pair, on the sweep each one's height can afford.
+
+    The score is two-row everywhere, so only the sweep changes: a pair the strip kernel's carry
+    can index goes out with the batch, and a taller one takes the tiled sweep by itself.
+    """
     var requested_mode = mode_from(mode)
-    if executor_from(requested.device) == Executor.DEVICE:
+    var executor = executor_from(requested.device)
+    var pairs = paired_length(firsts, seconds)
+
+    var results = Python().list()
+    if pairs == 0:
+        return results
+    for _ in range(pairs):
+        results.append(Python().none())
+
+    if executor == Executor.HOST:
+        for index in range(pairs):
+            comptime for choice in range(len(ALL_MODES)):
+                comptime candidate = ALL_MODES[choice]
+                if requested_mode == candidate:
+                    results[index] = gotoh_score[candidate](firsts[index], seconds[index], substitution, gaps)
+        return results
+
+    var placement = placement_from(requested)
+    var band = device_band(placement)
+    var banded = List[Int]()
+    """The strip kernel indexes its carry by the first sequence, so height alone decides."""
+    var tiled = List[Int]()
+    for index in range(pairs):
+        if serving_space(python_length(firsts[index]), band) == Space.BANDED:
+            banded.append(index)
+        else:
+            tiled.append(index)
+
+    if len(banded) > 0:
+        var batch_firsts = Python().list()
+        var batch_seconds = Python().list()
+        for slot in range(len(banded)):
+            batch_firsts.append(firsts[banded[slot]])
+            batch_seconds.append(seconds[banded[slot]])
         comptime for index in range(len(ALL_MODES)):
             comptime candidate = ALL_MODES[index]
             if requested_mode == candidate:
-                return gotoh_scores_batch[candidate](firsts, seconds, substitution, gaps, placement_from(requested))
+                var scored = gotoh_scores_batch[candidate](batch_firsts, batch_seconds, substitution, gaps, placement)
+                for slot in range(len(banded)):
+                    results[banded[slot]] = scored[slot]
 
-    var results = Python().list()
-    for index in range(paired_length(firsts, seconds)):
+    for slot in range(len(tiled)):
+        var index = tiled[slot]
         comptime for choice in range(len(ALL_MODES)):
             comptime candidate = ALL_MODES[choice]
             if requested_mode == candidate:
-                results.append(gotoh_score[candidate](firsts[index], seconds[index], substitution, gaps))
+                results[index] = gotoh_score_linear_gpu[candidate](
+                    firsts[index], seconds[index], substitution, gaps, placement
+                )
     return results
 
 
@@ -608,6 +675,7 @@ def align_pair(
     mode: AlignmentMode,
     executor: Executor,
     stored_budget: Int,
+    band: Int,
     substitution: PythonObject,
     gaps: PythonObject,
     placement: Placement,
@@ -615,7 +683,7 @@ def align_pair(
     """One pair, on the path its matrix can afford."""
     var cells = python_length(first) * python_length(second)
     var limit = min(stored_budget, DEVICE_STORED_CELLS) if executor == Executor.DEVICE else stored_budget
-    var too_tall = executor == Executor.DEVICE and python_length(first) > MAX_BAND_LENGTH
+    var too_tall = executor == Executor.DEVICE and serving_space(python_length(first), band) == Space.TILED
     if cells > limit or too_tall:
         if executor == Executor.DEVICE:
             if mode == AlignmentMode.LOCAL:
@@ -666,6 +734,9 @@ def gotoh_alignments(
     var limit = budget if pairs > 1 else min(budget, DEVICE_STORED_CELLS)
     """A batch of one is a single pair however it arrived, and gets the single pair's crossover."""
 
+    var band = device_band(placement) if executor == Executor.DEVICE else 0
+    """Only the device path has a carry to outgrow, so the host never pays for the query."""
+
     var batchable = List[Int]()
     """
     Both bounds are real and independent: the stored kernel indexes its carry by the first sequence, so a tall pair
@@ -675,7 +746,7 @@ def gotoh_alignments(
     if executor == Executor.DEVICE:
         for index in range(pairs):
             var rows = python_length(firsts[index])
-            if rows * python_length(seconds[index]) <= limit and rows <= MAX_BAND_LENGTH:
+            if rows * python_length(seconds[index]) <= limit and serving_space(rows, band) == Space.BANDED:
                 batchable.append(index)
 
     var results = Python().list()
@@ -702,7 +773,7 @@ def gotoh_alignments(
     for index in range(pairs):
         if not placed[index]:
             results[index] = align_pair(
-                firsts[index], seconds[index], requested_mode, executor, budget, substitution, gaps, placement
+                firsts[index], seconds[index], requested_mode, executor, budget, band, substitution, gaps, placement
             )
     return results
 
