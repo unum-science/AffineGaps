@@ -259,19 +259,49 @@ def _resolve(backend: Backend | None, device: Device | None) -> tuple[Backend, D
     return (Backend.MOJO, device)
 
 
-def _custom_scoring(substitution) -> bool:
-    """Whether the caller supplied a table the compiled backend does not carry.
+COMPILED_SCORE_RANGE = (-128, 127)
+"""What the compiled kernels' `int8` substitution matrix holds, outside which a score would wrap."""
 
-    The compiled kernels hold the default matrix and can build a uniform one, so only an explicit
-    table is out of reach.
+
+REFERENCE_SCORE_RANGE = (-(2**31), 2**31 - 1)
+"""What every backend's `int32` accumulator holds, outside which a penalty cannot be represented."""
+
+
+def _fits_compiled_scores(*scores: int) -> bool:
+    """Whether every score survives the narrowing the compiled kernels build their matrix in."""
+    low, high = COMPILED_SCORE_RANGE
+    return all(low <= score <= high for score in scores)
+
+
+def _fits_reference_scores(*scores: int) -> bool:
+    """Whether every score fits the `int32` both the reference tables and the kernels accumulate in."""
+    low, high = REFERENCE_SCORE_RANGE
+    return all(low <= score <= high for score in scores)
+
+
+def _custom_scoring(substitution) -> bool:
+    """Whether the caller supplied scoring the compiled backend does not carry.
+
+    The compiled kernels hold the default matrix and can build a uniform one, so an explicit table
+    is out of reach, and so is a uniform pair too wide for the `int8` they build it in.
     """
-    return isinstance(substitution, TabulatedSubstitutionCosts)
+    if isinstance(substitution, TabulatedSubstitutionCosts):
+        return True
+    if isinstance(substitution, UniformSubstitutionCosts):
+        return not _fits_compiled_scores(substitution.match, substitution.mismatch)
+    return False
 
 
 def _reject_custom_scoring(algorithm, backend, options):
     """The compiled backends carry only the default table, plus a uniform match/mismatch pair."""
-    if _custom_scoring(options.get("substitution")):
+    substitution = options.get("substitution")
+    if isinstance(substitution, TabulatedSubstitutionCosts):
         raise NotImplementedError(f"{algorithm} on the {backend} backend needs match/mismatch or the default matrix")
+    if _custom_scoring(substitution):
+        raise NotImplementedError(
+            f"{algorithm} on the {backend} backend scores in int8, so match and mismatch must lie in "
+            f"[{COMPILED_SCORE_RANGE[0]}, {COMPILED_SCORE_RANGE[1]}]"
+        )
 
 
 def _compiled_call(algorithm, backend, device, first, second, options) -> Any:
@@ -533,8 +563,18 @@ def sankoff_cofold(
     is covariation and no energy model is involved. Memory grows as the fourth power of the
     sequence length, which is inherent to the recurrence and bounds this to a few hundred bases.
     """
+    if not _fits_reference_scores(gap):
+        raise ValueError(f"A gap penalty must lie in [{REFERENCE_SCORE_RANGE[0]}, {REFERENCE_SCORE_RANGE[1]}]")
+    # A pair the compiled matrix cannot hold steers an unnamed backend away, as scoring does.
+    if backend is None and not _fits_compiled_scores(match, mismatch):
+        backend = Backend.NUMBA if HAS_NUMBA else Backend.PYTHON
     backend, device = _resolve(backend, device)
     if backend is Backend.MOJO:
+        if not _fits_compiled_scores(match, mismatch):
+            raise NotImplementedError(
+                f"cofold on the {backend} backend scores in int8, so match and mismatch must lie in "
+                f"[{COMPILED_SCORE_RANGE[0]}, {COMPILED_SCORE_RANGE[1]}]"
+            )
         compiled = _compiled_module()
         left, right, structure, score = compiled.sankoff_cofold(
             first, second, gap, match, mismatch, replace(placement or Placement(), device=device)

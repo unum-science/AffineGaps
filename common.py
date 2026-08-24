@@ -43,6 +43,9 @@ class AffineGapCosts:
         # Checked here rather than per call, so no backend can be handed a non-affine recurrence.
         if self.open > self.extend:
             raise ValueError("Opening a gap must not cost less than extending it.")
+        if self.extend > 0:
+            # A rewarded gap leaves the border sentinels undominated, so the seeded layer wins.
+            raise ValueError("Gap penalties must not be positive.")
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,12 @@ class TabulatedSubstitutionCosts:
 
     alphabet: str
     matrix: np.ndarray
+
+    def __post_init__(self):
+        # NumBa indexes this with bounds checking off, so a wrong shape reads past the array.
+        expected = (len(self.alphabet), len(self.alphabet))
+        if self.matrix.shape != expected:
+            raise ValueError(f"A {len(self.alphabet)}-letter alphabet needs a {expected} matrix.")
 
 
 def _translate_sequence(sequence: str, alphabet: str) -> np.ndarray:
