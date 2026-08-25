@@ -44,7 +44,7 @@ license-files = ["LICENSE"]
 name = "affinegaps"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.12"
-version = "0.2.5"
+version = "1.0.0"
 
 [project.urls]
 Homepage = "https://github.com/unum-science/AffineGaps"

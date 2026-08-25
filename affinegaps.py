@@ -89,7 +89,7 @@ from common import (
 )
 from folding import zuker_fold as _zuker_fold_reference
 
-__version__ = "0.2.5"
+__version__ = "1.0.0"
 
 # Re-exported so the split into per-recurrence modules stays invisible to callers.
 __all__ = [

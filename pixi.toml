@@ -7,7 +7,7 @@ license-file = "LICENSE"
 name = "affinegaps"
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 readme = "README.md"
-version = "0.2.5"
+version = "1.0.0"
 
 # What an installed copy needs. Everything below is a feature named after its counterpart in
 # `pyproject.toml`, so a group added there has one obvious place to land here.

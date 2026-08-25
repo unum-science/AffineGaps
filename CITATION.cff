@@ -5,7 +5,7 @@ title: >-
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
-version: 0.2.5
+version: 1.0.0
 doi: 10.5281/zenodo.22045581
 repository-code: https://github.com/unum-science/AffineGaps
 url: https://github.com/unum-science/AffineGaps
