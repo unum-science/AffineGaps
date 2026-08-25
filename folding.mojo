@@ -8,7 +8,7 @@ launches; `exterior` holds one live cell per window and follows in a single desc
 
 Everything is indexed by `(start, window)`, so a bifurcation reads strictly smaller lengths and
 every cell of a window is independent. Memory is $O(n^2)$ and time is $O(n^3)$, the interior-loop
-term bounded by capping a loop at `MAX_LOOP` unpaired bases as this recurrence always is.
+term bounded by capping a loop at `LOOP_LIMIT` unpaired bases as this recurrence always is.
 
 Energies are integer decikilocalories per mole, so a fold is reproducible bit for bit rather than
 depending on floating-point association order.
@@ -35,9 +35,12 @@ from common import (
     DEFAULT_RNA_ALPHABET,
     DeviceScope,
     OPEN_BYTE,
+    PositionDType,
+    RNA_ALPHABET_SIZE,
     SymbolDType,
     THREADS_PER_BLOCK,
     UNPAIRED_BYTE,
+    WARPS_PER_BLOCK,
     filled,
     translate,
     upload,
@@ -73,17 +76,15 @@ from turner import (
 
 # region Energy Model
 
-comptime MAX_LOOP = LOOP_LIMIT
 comptime MIN_TURN = 3
 """Fewest bases any pair must enclose, which is what the backbone can turn in."""
 comptime MIN_CLOSING_REACH = MIN_TURN + 1
 """The turn plus the partner past it: the shortest head-to-partner distance."""
 comptime MIN_PAIRED_WINDOW = MIN_CLOSING_REACH + 1
 """The reach plus the head: the shortest window `paired` can be finite on."""
-comptime PositionDType = DType.int32
-comptime RNA_ALPHABET_SIZE = 4
-"""Letters the folding model knows, which is what sizes the per-letter partner runs."""
-comptime WARPS_PER_BLOCK = THREADS_PER_BLOCK // WARP_SIZE
+comptime RNA_MISMATCH_PAIRS = RNA_ALPHABET_SIZE * RNA_ALPHABET_SIZE
+"""Ordered base pairs, which is the stride of every table indexed by two of them."""
+
 
 comptime PAIR_CG = 1
 """The two Watson-Crick pairs that are not charged a helix-end penalty."""
@@ -96,14 +97,14 @@ comptime HEXALOOP_COUNT = len(HEXALOOP_KEYS)
 
 comptime STACK_OFFSET = 0
 comptime MISMATCH_OFFSET = STACK_OFFSET + PAIR_TYPES * PAIR_TYPES
-comptime MISMATCH_INTERNAL_OFFSET = MISMATCH_OFFSET + PAIR_TYPES * 16
-comptime DANGLE_AFTER_OFFSET = MISMATCH_INTERNAL_OFFSET + PAIR_TYPES * 16
-comptime DANGLE_BEFORE_OFFSET = DANGLE_AFTER_OFFSET + PAIR_TYPES * 4
-comptime HAIRPIN_OFFSET = DANGLE_BEFORE_OFFSET + PAIR_TYPES * 4
+comptime MISMATCH_INTERNAL_OFFSET = MISMATCH_OFFSET + PAIR_TYPES * RNA_MISMATCH_PAIRS
+comptime DANGLE_AFTER_OFFSET = MISMATCH_INTERNAL_OFFSET + PAIR_TYPES * RNA_MISMATCH_PAIRS
+comptime DANGLE_BEFORE_OFFSET = DANGLE_AFTER_OFFSET + PAIR_TYPES * RNA_ALPHABET_SIZE
+comptime HAIRPIN_OFFSET = DANGLE_BEFORE_OFFSET + PAIR_TYPES * RNA_ALPHABET_SIZE
 comptime BULGE_OFFSET = HAIRPIN_OFFSET + LOOP_LIMIT + 1
 comptime INTERNAL_OFFSET = BULGE_OFFSET + LOOP_LIMIT + 1
 comptime PAIR_INDEX_OFFSET = INTERNAL_OFFSET + LOOP_LIMIT + 1
-comptime TRILOOP_KEY_OFFSET = PAIR_INDEX_OFFSET + 16
+comptime TRILOOP_KEY_OFFSET = PAIR_INDEX_OFFSET + RNA_MISMATCH_PAIRS
 comptime TRILOOP_ENERGY_OFFSET = TRILOOP_KEY_OFFSET + TRILOOP_COUNT
 comptime TETRALOOP_KEY_OFFSET = TRILOOP_ENERGY_OFFSET + TRILOOP_COUNT
 comptime TETRALOOP_ENERGY_OFFSET = TETRALOOP_KEY_OFFSET + TETRALOOP_COUNT
@@ -134,17 +135,17 @@ def packed_energy_model() -> List[Scalar[EnergyDType]]:
     var packed = List[Scalar[EnergyDType]](unsafe_uninit_length=ENERGY_MODEL_LENGTH)
     for index in range(PAIR_TYPES * PAIR_TYPES):
         packed[STACK_OFFSET + index] = stack[index]
-    for index in range(PAIR_TYPES * 16):
+    for index in range(PAIR_TYPES * RNA_MISMATCH_PAIRS):
         packed[MISMATCH_OFFSET + index] = hairpin_mismatch[index]
         packed[MISMATCH_INTERNAL_OFFSET + index] = internal_mismatch[index]
-    for index in range(PAIR_TYPES * 4):
+    for index in range(PAIR_TYPES * RNA_ALPHABET_SIZE):
         packed[DANGLE_AFTER_OFFSET + index] = after[index]
         packed[DANGLE_BEFORE_OFFSET + index] = before[index]
     for index in range(LOOP_LIMIT + 1):
         packed[HAIRPIN_OFFSET + index] = hairpin[index]
         packed[BULGE_OFFSET + index] = bulge[index]
         packed[INTERNAL_OFFSET + index] = internal[index]
-    for index in range(16):
+    for index in range(RNA_MISMATCH_PAIRS):
         packed[PAIR_INDEX_OFFSET + index] = is_pair[index]
     for index in range(TRILOOP_COUNT):
         packed[TRILOOP_KEY_OFFSET + index] = triloop_keys[index]
@@ -171,7 +172,7 @@ def is_pair(index: Int) -> Bool:
 @always_inline
 def pair_of(energy_model: Pointer[Scalar[EnergyDType], _], first: Int, second: Int) -> Int:
     """Which of the six pair types two bases form, or a negative value for none."""
-    return Int(energy_model[unsafe_offset=PAIR_INDEX_OFFSET + first * 4 + second])
+    return Int(energy_model[unsafe_offset=PAIR_INDEX_OFFSET + first * RNA_ALPHABET_SIZE + second])
 
 
 @always_inline
@@ -187,7 +188,7 @@ def packed_key(sequence: Pointer[Scalar[SymbolDType], _], start: Int, end: Int) 
     """The closing pair and loop bases packed base-four, most significant first."""
     var key = Int32(0)
     for index in range(start, end + 1):
-        key = key * 4 + Int32(Int(sequence[unsafe_offset=index]))
+        key = key * Int32(RNA_ALPHABET_SIZE) + Int32(Int(sequence[unsafe_offset=index]))
     return key
 
 
@@ -240,18 +241,19 @@ def dangle_energy(
         return Int32(0)
     var total = Int32(0)
     if start > 0:
-        total += energy_model[unsafe_offset=DANGLE_BEFORE_OFFSET + outward * 4 + Int(sequence[unsafe_offset=start - 1])]
+        total += energy_model[
+            unsafe_offset=DANGLE_BEFORE_OFFSET + outward * RNA_ALPHABET_SIZE + Int(sequence[unsafe_offset=start - 1])
+        ]
     if end < sequence_length - 1:
-        total += energy_model[unsafe_offset=DANGLE_AFTER_OFFSET + outward * 4 + Int(sequence[unsafe_offset=end + 1])]
+        total += energy_model[
+            unsafe_offset=DANGLE_AFTER_OFFSET + outward * RNA_ALPHABET_SIZE + Int(sequence[unsafe_offset=end + 1])
+        ]
     return total
 
 
 @always_inline
 def hairpin_energy(
-    sequence: Pointer[Scalar[SymbolDType], _],
-    energy_model: Pointer[Scalar[EnergyDType], _],
-    start: Int,
-    end: Int,
+    sequence: Pointer[Scalar[SymbolDType], _], energy_model: Pointer[Scalar[EnergyDType], _], start: Int, end: Int
 ) -> Int32:
     """A hairpin closed by `(start, end)`, with everything between it unpaired."""
     var size = end - start - 1
@@ -278,7 +280,12 @@ def hairpin_energy(
     return (
         initiation
         + helix_end_penalty(pair)
-        + energy_model[unsafe_offset=MISMATCH_OFFSET + pair * 16 + first_unpaired * 4 + last_unpaired]
+        + energy_model[
+            unsafe_offset=MISMATCH_OFFSET
+            + pair * RNA_MISMATCH_PAIRS
+            + first_unpaired * RNA_ALPHABET_SIZE
+            + last_unpaired
+        ]
     )
 
 
@@ -300,10 +307,7 @@ struct ClosingPair(ImplicitlyCopyable, TrivialRegisterPassable):
 
 @always_inline
 def closing_pair(
-    sequence: Pointer[Scalar[SymbolDType], _],
-    energy_model: Pointer[Scalar[EnergyDType], _],
-    start: Int,
-    end: Int,
+    sequence: Pointer[Scalar[SymbolDType], _], energy_model: Pointer[Scalar[EnergyDType], _], start: Int, end: Int
 ) -> ClosingPair:
     """Everything one cell's closing pair contributes, hoisted out of the interior scan."""
     var pair = pair_of(energy_model, Int(sequence[unsafe_offset=start]), Int(sequence[unsafe_offset=end]))
@@ -311,8 +315,8 @@ def closing_pair(
         return ClosingPair(pair, 0, 0)
     var mismatch = energy_model[
         unsafe_offset=MISMATCH_INTERNAL_OFFSET
-        + pair * 16
-        + Int(sequence[unsafe_offset=start + 1]) * 4
+        + pair * RNA_MISMATCH_PAIRS
+        + Int(sequence[unsafe_offset=start + 1]) * RNA_ALPHABET_SIZE
         + Int(sequence[unsafe_offset=end - 1])
     ]
     return ClosingPair(pair, mismatch, helix_end_penalty(pair))
@@ -339,7 +343,7 @@ def interior_energy(
         return FORBIDDEN
     var unpaired_before = inner_start - start - 1
     var unpaired_after = end - inner_end - 1
-    if unpaired_before + unpaired_after > MAX_LOOP:
+    if unpaired_before + unpaired_after > LOOP_LIMIT:
         return FORBIDDEN
     if unpaired_before == 0 and unpaired_after == 0:
         return energy_model[unsafe_offset=STACK_OFFSET + outer * PAIR_TYPES + inner]
@@ -365,8 +369,8 @@ def interior_energy(
     """
     var inner_mismatch = energy_model[
         unsafe_offset=MISMATCH_INTERNAL_OFFSET
-        + reversed_inner * 16
-        + Int(sequence[unsafe_offset=inner_end + 1]) * 4
+        + reversed_inner * RNA_MISMATCH_PAIRS
+        + Int(sequence[unsafe_offset=inner_end + 1]) * RNA_ALPHABET_SIZE
         + Int(sequence[unsafe_offset=inner_start - 1])
     ]
     var closure = closing.penalty + helix_end_penalty(reversed_inner)
@@ -381,9 +385,9 @@ def cell_index(start: Int, window: Int, sequence_length: Int) -> Int:
 
 @always_inline
 def interior_end_floor(start: Int, end: Int, inner_start: Int) -> Int:
-    """The earliest inner end that keeps the loop within `MAX_LOOP` unpaired bases."""
+    """The earliest inner end that keeps the loop within `LOOP_LIMIT` unpaired bases."""
     var unpaired_before = inner_start - start - 1
-    var floor = end - 1 - (MAX_LOOP - unpaired_before)
+    var floor = end - 1 - (LOOP_LIMIT - unpaired_before)
     return max(floor, inner_start + MIN_CLOSING_REACH)
 
 
@@ -444,8 +448,7 @@ def reachable_partners(
         return PartnerRange(0, 0)
     var run = head * (sequence_length + 1)
     return PartnerRange(
-        Int(bounds[unsafe_offset=run + start + MIN_CLOSING_REACH]),
-        Int(bounds[unsafe_offset=run + start + window]),
+        Int(bounds[unsafe_offset=run + start + MIN_CLOSING_REACH]), Int(bounds[unsafe_offset=run + start + window])
     )
 
 
@@ -514,7 +517,7 @@ def paired_cell(
     var best = hairpin_energy(sequence, energy_model, start, end)
     var closing = closing_pair(sequence, energy_model, start, end)
     for inner_start in range(start + 1, end):
-        if inner_start - start - 1 > MAX_LOOP:
+        if inner_start - start - 1 > LOOP_LIMIT:
             break
         for inner_end in range(interior_end_floor(start, end, inner_start), end):
             var inner_window = inner_end - inner_start + 1
@@ -663,14 +666,7 @@ def serial_fold_tables(
                 sequence_pointer, energy_model_pointer, paired_pointer, sequence_length, start, start + window - 1
             )
             multiloop[here] = multiloop_cell(
-                sequence_pointer,
-                branch_pointer,
-                multiloop_pointer,
-                positions,
-                bounds,
-                sequence_length,
-                start,
-                window,
+                sequence_pointer, branch_pointer, multiloop_pointer, positions, bounds, sequence_length, start, window
             )
             closable[here] = multiloop_closable_cell(
                 sequence_pointer,
@@ -698,7 +694,7 @@ def serial_fold_tables(
 
 # region GPU Sweep
 
-comptime INTERIOR_COMBINATIONS = (MAX_LOOP + 1) * (MAX_LOOP + 1)
+comptime INTERIOR_COMBINATIONS = (LOOP_LIMIT + 1) * (LOOP_LIMIT + 1)
 """
 The interior-loop scan is a triangle of unpaired counts on each side; flattening it to a square and discarding the
 corner keeps the thread mapping a division rather than a search.
@@ -707,8 +703,7 @@ corner keeps the thread mapping a division rather than a search.
 
 @always_inline
 def block_min(
-    warp_totals: Pointer[Scalar[EnergyDType], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
-    best: Int32,
+    warp_totals: Pointer[Scalar[EnergyDType], MutUntrackedOrigin, address_space=AddressSpace.SHARED], best: Int32
 ) -> Int32:
     """Block-wide minimum in two stages, left in every thread so the caller needs no second barrier.
 
@@ -764,9 +759,9 @@ def paired_kernel(
 
     var closing = closing_pair(sequence, energy_model, start, end)
     for combined in range(Int(thread_idx.x), INTERIOR_COMBINATIONS, THREADS_PER_BLOCK):
-        var before = combined // (MAX_LOOP + 1)
-        var after = combined % (MAX_LOOP + 1)
-        if before + after > MAX_LOOP:
+        var before = combined // (LOOP_LIMIT + 1)
+        var after = combined % (LOOP_LIMIT + 1)
+        if before + after > LOOP_LIMIT:
             continue
         var inner_start = start + 1 + before
         var inner_end = end - 1 - after
@@ -980,7 +975,7 @@ def winning_interior(
     var stored = paired[unsafe_offset=cell_index(start, window, sequence_length)]
     var closing = closing_pair(sequence, energy_model, start, end)
     for inner_start in range(start + 1, end):
-        if inner_start - start - 1 > MAX_LOOP:
+        if inner_start - start - 1 > LOOP_LIMIT:
             break
         for inner_end in range(interior_end_floor(start, end, inner_start), end):
             var inner_window = inner_end - inner_start + 1
@@ -1061,9 +1056,7 @@ def winning_branch(
 
 
 def fold_traceback(
-    sequence: ImmSpan[Scalar[SymbolDType], _],
-    energy_model: ImmSpan[Scalar[EnergyDType], _],
-    folded: FoldTables,
+    sequence: ImmSpan[Scalar[SymbolDType], _], energy_model: ImmSpan[Scalar[EnergyDType], _], folded: FoldTables
 ) raises AffineGapsError -> String:
     """Walks the tables into a dot-bracket structure.
 

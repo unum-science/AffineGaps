@@ -58,7 +58,7 @@ numba = ["numba"]
 [dependency-groups]
 lint = ["ruff>=0.15", "black>=26", "mypy>=2", "pyright>=1.1", "numpy"]
 # `colorama` is an extra at runtime, but the colour path cannot be tested without it.
-test = ["biopython", "colorama", "pytest", "pytest-repeat", "stringzilla", "viennarna"]
+test = ["biopython", "colorama", "pytest", "pytest-repeat", "viennarna"]
 
 [tool.pytest.ini_options]
 addopts = "-q" # no -x: with a backend axis, every backend's failure matters
@@ -66,6 +66,9 @@ addopts = "-q" # no -x: with a backend axis, every backend's failure matters
 [tool.black]
 line-length = 120
 target-version = ['py312']
+# A trailing comma otherwise pins a call open one argument per line however short it is, which
+# spends the width budget this file sets rather than using it.
+skip-magic-trailing-comma = true
 
 [tool.ruff]
 line-length = 120

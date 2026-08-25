@@ -43,10 +43,13 @@ from common import (
     GAP_BYTE,
     NEGATIVE_INFINITY,
     OPEN_BYTE,
+    PositionDType,
+    RNA_ALPHABET_SIZE,
     SubstitutionDType,
     SymbolDType,
     THREADS_PER_BLOCK,
     UNPAIRED_BYTE,
+    WARPS_PER_BLOCK,
     translate,
     uniform_matrix,
     upload,
@@ -55,18 +58,16 @@ from common import (
 
 # region Scoring
 
-comptime DEFAULT_RNA_ALPHABET_SIZE = 4
-comptime DEFAULT_MATCH = Int32(2)
-comptime DEFAULT_MISMATCH = Int32(-1)
-comptime DEFAULT_GAP = Int32(-2)
+comptime DEFAULT_SANKOFF_MATCH = Int32(2)
+"""Credit for aligning two equal bases, which Sankoff scores rather than the Turner tables."""
+comptime DEFAULT_SANKOFF_MISMATCH = Int32(-1)
+comptime DEFAULT_SANKOFF_GAP = Int32(-2)
 comptime MIN_TURN = 3
 """Fewest bases any pair must enclose, the same floor `folding.mojo` applies."""
 comptime MIN_CLOSING_REACH = MIN_TURN + 1
 """The turn plus the partner past it: the shortest head-to-partner distance."""
 comptime CellDType = DType.int16
 """Storage for one table cell. Narrower than the arithmetic, because the table is what binds."""
-comptime PositionDType = DType.int32
-comptime WARPS_PER_BLOCK = THREADS_PER_BLOCK // WARP_SIZE
 
 
 @fieldwise_init
@@ -90,11 +91,7 @@ struct Neighbours(ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @always_inline
-def read_neighbours(
-    table: Pointer[Scalar[CellDType], _],
-    windows: WindowPair,
-    shape: TableShape,
-) -> Neighbours:
+def read_neighbours(table: Pointer[Scalar[CellDType], _], windows: WindowPair, shape: TableShape) -> Neighbours:
     """The three cells one Sankoff cell reads, in the order the recurrence tries them.
 
     One reader serves the host sweep, the device sweep and the traceback, so a case can never be
@@ -215,9 +212,7 @@ struct TableShape(ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 def partner_index(
-    sequence: ImmSpan[Scalar[SymbolDType], _],
-    pairs: ImmSpan[Scalar[SubstitutionDType], _],
-    alphabet_size: Int,
+    sequence: ImmSpan[Scalar[SymbolDType], _], pairs: ImmSpan[Scalar[SubstitutionDType], _], alphabet_size: Int
 ) -> PartnerIndex:
     """Lists, per letter, every position in the sequence that letter can close a pair with.
 
@@ -239,11 +234,7 @@ def partner_index(
 
 @always_inline
 def partner_range(
-    bounds: Pointer[Scalar[PositionDType], _],
-    head: Int,
-    sequence_length: Int,
-    start: Int,
-    window: Int,
+    bounds: Pointer[Scalar[PositionDType], _], head: Int, sequence_length: Int, start: Int, window: Int
 ) -> PartnerRange:
     """Which of `head`'s partners a window can reach, as a slice of that letter's run.
 
@@ -253,10 +244,7 @@ def partner_range(
     """
     var run = head * (sequence_length + 1)
     var floor = min(MIN_CLOSING_REACH, window)
-    return PartnerRange(
-        Int(bounds[unsafe_offset=run + start + floor]),
-        Int(bounds[unsafe_offset=run + start + window]),
-    )
+    return PartnerRange(Int(bounds[unsafe_offset=run + start + floor]), Int(bounds[unsafe_offset=run + start + window]))
 
 
 @fieldwise_init
@@ -288,9 +276,7 @@ def paired_heads(
     var head_first = Int(first[unsafe_offset=start_first])
     var head_second = Int(second[unsafe_offset=start_second])
     return PairedHeads(
-        head_first,
-        head_second,
-        Int32(substitutions[unsafe_offset=head_first * alphabet_size + head_second]),
+        head_first, head_second, Int32(substitutions[unsafe_offset=head_first * alphabet_size + head_second])
     )
 
 
@@ -318,8 +304,7 @@ def paired_candidate(
     var inside = Int32(
         table[
             unsafe_offset=cell_index(
-                WindowPair(windows.start_first + 1, reach_first - 1, windows.start_second + 1, reach_second - 1),
-                shape,
+                WindowPair(windows.start_first + 1, reach_first - 1, windows.start_second + 1, reach_second - 1), shape
             )
         ]
     )
@@ -902,10 +887,7 @@ def expand_window(
             alphabet_size,
             scoring,
             WindowPair(
-                windows.start_first + 1,
-                windows.window_first - 1,
-                windows.start_second + 1,
-                windows.window_second - 1,
+                windows.start_first + 1, windows.window_first - 1, windows.start_second + 1, windows.window_second - 1
             ),
             gapped_first,
             gapped_second,
@@ -1003,18 +985,18 @@ def default_rna_pair_matrix() -> List[Scalar[SubstitutionDType]]:
     These rank pairings, they are not measured energies.
     """
     var pairs = List[Scalar[SubstitutionDType]](
-        length=DEFAULT_RNA_ALPHABET_SIZE * DEFAULT_RNA_ALPHABET_SIZE, fill=Scalar[SubstitutionDType](0)
+        length=RNA_ALPHABET_SIZE * RNA_ALPHABET_SIZE, fill=Scalar[SubstitutionDType](0)
     )
     var adenine = 0
     var cytosine = 1
     var guanine = 2
     var uracil = 3
-    pairs[cytosine * DEFAULT_RNA_ALPHABET_SIZE + guanine] = 3
-    pairs[guanine * DEFAULT_RNA_ALPHABET_SIZE + cytosine] = 3
-    pairs[adenine * DEFAULT_RNA_ALPHABET_SIZE + uracil] = 2
-    pairs[uracil * DEFAULT_RNA_ALPHABET_SIZE + adenine] = 2
-    pairs[guanine * DEFAULT_RNA_ALPHABET_SIZE + uracil] = 1
-    pairs[uracil * DEFAULT_RNA_ALPHABET_SIZE + guanine] = 1
+    pairs[cytosine * RNA_ALPHABET_SIZE + guanine] = 3
+    pairs[guanine * RNA_ALPHABET_SIZE + cytosine] = 3
+    pairs[adenine * RNA_ALPHABET_SIZE + uracil] = 2
+    pairs[uracil * RNA_ALPHABET_SIZE + adenine] = 2
+    pairs[guanine * RNA_ALPHABET_SIZE + uracil] = 1
+    pairs[uracil * RNA_ALPHABET_SIZE + guanine] = 1
     return pairs^
 
 

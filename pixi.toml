@@ -48,7 +48,6 @@ ruff = ">=0.15"
 biopython = "*"
 pytest = "*"
 pytest-repeat = "*"
-stringzilla = "*"
 viennarna = "*"
 
 # One environment holding every feature: a backend left out of it is a backend whose tests skip
@@ -82,7 +81,7 @@ speed = {cmd = "python bench.py speed --backend mojo --device gpu", depends-on =
 # rather than as a hardcoded path in the package metadata.
 lint = """
 uvx ruff check *.py &&
-uvx black --line-length 120 --check *.py &&
+uvx black --line-length 120 --skip-magic-trailing-comma --check *.py &&
 uvx pyright --pythonpath .pixi/envs/default/bin/python
 """
 

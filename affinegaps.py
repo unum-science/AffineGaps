@@ -63,7 +63,9 @@ from alignment import (
     _smith_waterman_gotoh_score_recurrence,
     _validate_gotoh_arguments,
     colorize_alignment,
+    default_proteins_costs,
     default_proteins_matrix,
+    default_proteins_scale,
     levenshtein_alignment,
 )
 
@@ -73,6 +75,7 @@ from common import (
     HAS_NUMBA,
     AffineGapCosts,
     Backend,
+    Background,
     Device,
     GpuSpecs,
     Placement,
@@ -92,6 +95,7 @@ __version__ = "0.2.5"
 __all__ = [
     "AffineGapCosts",
     "Backend",
+    "Background",
     "Device",
     "GpuSpecs",
     "TabulatedSubstitutionCosts",
@@ -99,7 +103,9 @@ __all__ = [
     "available",
     "colorize_alignment",
     "default_proteins_alphabet",
+    "default_proteins_costs",
     "default_proteins_matrix",
+    "default_proteins_scale",
     "default_rna_alphabet",
     "default_rna_pair_matrix",
     "gpu_specs",
@@ -120,7 +126,8 @@ __all__ = [
 # region Backends
 
 # Above this many cells the traceback switches to the linear-space recursion, which produces
-# identical output. Five matrices at seventeen bytes a cell keeps a stored alignment near 100 MB.
+# identical output. Three int32 layers at twelve bytes a cell keeps a stored host alignment near
+# 72 MB; the device path packs a decision nibble per cell and is capped again by `DEVICE_STORED_CELLS`.
 _STORED_MATRIX_BUDGET = 6_000_000
 
 
@@ -337,13 +344,13 @@ def _compiled_batch(algorithm, backend, device, firsts, seconds, options) -> Any
     """
     _reject_custom_scoring(algorithm, backend, options)
     spec = _ALGORITHMS[algorithm]
-    entry = getattr(_mojo_backend(), _COMPILED_ENTRY[spec.result])
+    entry_point = getattr(_mojo_backend(), _COMPILED_ENTRY[spec.result])
     substitution = options.get("substitution")
     gaps = options.get("gaps") or AffineGapCosts()
     placement = replace(options.get("placement") or Placement(), device=device)
     if spec.result is Result.SCORE:
-        return list(entry(list(firsts), list(seconds), spec.mode, placement, substitution, gaps))
-    outcome = entry(list(firsts), list(seconds), spec.mode, placement, substitution, gaps, _STORED_MATRIX_BUDGET)
+        return list(entry_point(list(firsts), list(seconds), spec.mode, placement, substitution, gaps))
+    outcome = entry_point(list(firsts), list(seconds), spec.mode, placement, substitution, gaps, _STORED_MATRIX_BUDGET)
     return [tuple(row) for row in outcome]
 
 
@@ -352,7 +359,10 @@ def _batch(algorithm, backend, device, firsts, seconds, **options):
     backend, device = _resolve_for(options.get("substitution"), backend, device)
     if device is Device.CPU:
         single = _ALGORITHMS[algorithm].reference
-        return [single(a, b, backend=backend, device=device, **options) for a, b in zip(firsts, seconds, strict=True)]
+        return [
+            single(first, second, backend=backend, device=device, **options)
+            for first, second in zip(firsts, seconds, strict=True)
+        ]
     return _compiled_batch(algorithm, backend, device, firsts, seconds, options)
 
 
@@ -442,11 +452,7 @@ def needleman_wunsch_gotoh_alignment(
     encoded_first = _translate_sequence(first, substitution_alphabet)
     encoded_second = _translate_sequence(second, substitution_alphabet)
     scores, changes, deletes, inserts = _callable_for(_needleman_wunsch_gotoh_recurrence, backend)(
-        encoded_first,
-        encoded_second,
-        substitution_matrix=substitution_matrix,
-        opening=opening,
-        extend=extend,
+        encoded_first, encoded_second, substitution_matrix=substitution_matrix, opening=opening, extend=extend
     )
 
     first_gapped, second_gapped = _reconstruct_alignment(
@@ -458,8 +464,8 @@ def needleman_wunsch_gotoh_alignment(
         encoded_second,
         opening,
         extend,
-        lambda x: substitution_alphabet[x],
-        lambda i, j: i > 0 and j > 0,
+        lambda code: substitution_alphabet[code],
+        lambda row, column: row > 0 and column > 0,
     )
     return first_gapped, second_gapped, int(scores[-1, -1])
 
@@ -518,11 +524,7 @@ def smith_waterman_gotoh_alignment(
     encoded_first = _translate_sequence(first, substitution_alphabet)
     encoded_second = _translate_sequence(second, substitution_alphabet)
     scores, changes, deletes, inserts, best_place = _callable_for(_smith_waterman_gotoh_recurrence, backend)(
-        encoded_first,
-        encoded_second,
-        substitution_matrix=substitution_matrix,
-        opening=opening,
-        extend=extend,
+        encoded_first, encoded_second, substitution_matrix=substitution_matrix, opening=opening, extend=extend
     )
 
     first_prefix, second_prefix = best_place
@@ -535,8 +537,8 @@ def smith_waterman_gotoh_alignment(
         encoded_second[:second_prefix],
         opening,
         extend,
-        lambda x: substitution_alphabet[x],
-        lambda i, j: i > 0 and j > 0 and scores[i, j] > 0,
+        lambda code: substitution_alphabet[code],
+        lambda row, column: row > 0 and column > 0 and scores[row, column] > 0,
         mode=Mode.LOCAL,
     )
     return first_gapped, second_gapped, int(scores[first_prefix, second_prefix])
@@ -604,11 +606,7 @@ def sankoff_cofold(
 
 
 def zuker_fold(
-    sequence: str,
-    *,
-    backend: Backend | None = None,
-    device: Device | None = None,
-    placement: Placement | None = None,
+    sequence: str, *, backend: Backend | None = None, device: Device | None = None, placement: Placement | None = None
 ) -> tuple[str, float]:
     """Minimum free energy folding of one RNA sequence over the Turner nearest-neighbour model.
 
@@ -712,10 +710,7 @@ def _build_parser() -> argparse.ArgumentParser:
     align.add_argument("--extend", type=int, help=f"Gap extension penalty, {AffineGapCosts().extend} by default")
     # Only the linear-space traceback runs a parallel region, so only this verb can honour a width.
     align.add_argument(
-        "--threads",
-        type=_counted,
-        default=hardware_threads(),
-        help="Host threads the traceback may fork across",
+        "--threads", type=_counted, default=hardware_threads(), help="Host threads the traceback may fork across"
     )
 
     fold = verbs.add_parser(Verb.FOLD, parents=[shared], add_help=False, help="Zuker folding of one RNA sequence")
@@ -730,79 +725,79 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_align(args) -> dict:
+def _run_align(options) -> dict:
     """Aligns the pair and returns the record the renderer prints."""
     substitution = None
-    if args.match is not None or args.mismatch is not None:
-        if args.match is None or args.mismatch is None:
+    if options.match is not None or options.mismatch is not None:
+        if options.match is None or options.mismatch is None:
             print("Error: --match and --mismatch must be given together.", file=sys.stderr)
             sys.exit(2)
-        substitution = UniformSubstitutionCosts(match=args.match, mismatch=args.mismatch)
+        substitution = UniformSubstitutionCosts(match=options.match, mismatch=options.mismatch)
     defaults = AffineGapCosts()
     gaps = AffineGapCosts(
-        open=defaults.open if args.open is None else args.open,
-        extend=defaults.extend if args.extend is None else args.extend,
+        open=defaults.open if options.open is None else options.open,
+        extend=defaults.extend if options.extend is None else options.extend,
     )
-    aligner = smith_waterman_gotoh_alignment if args.mode is Mode.LOCAL else needleman_wunsch_gotoh_alignment
+    aligner = smith_waterman_gotoh_alignment if options.mode is Mode.LOCAL else needleman_wunsch_gotoh_alignment
     first_gapped, second_gapped, score = aligner(
-        args.first,
-        args.second,
+        options.first,
+        options.second,
         substitution=substitution,
         gaps=gaps,
-        backend=args.backend,
-        device=args.device,
-        placement=Placement(device=args.device, gpu_id=args.gpu_id, threads=args.threads),
+        backend=options.backend,
+        device=options.device,
+        placement=Placement(device=options.device, gpu_id=options.gpu_id, threads=options.threads),
     )
     return {
         "operation": Verb.ALIGN,
-        "mode": args.mode,
-        "first": args.first,
-        "second": args.second,
+        "mode": options.mode,
+        "first": options.first,
+        "second": options.second,
         "first_gapped": first_gapped,
         "second_gapped": second_gapped,
         "score": score,
-        "cells": len(args.first) * len(args.second),
+        "cells": len(options.first) * len(options.second),
     }
 
 
-def _run_fold(args) -> dict:
+def _run_fold(options) -> dict:
     """Folds the sequence and returns the record the renderer prints."""
     structure, energy = zuker_fold(
-        args.sequence,
-        backend=args.backend,
-        device=args.device,
-        placement=Placement(device=args.device, gpu_id=args.gpu_id),
+        options.sequence,
+        backend=options.backend,
+        device=options.device,
+        placement=Placement(device=options.device, gpu_id=options.gpu_id),
     )
     return {
         "operation": Verb.FOLD,
-        "sequence": args.sequence,
+        "sequence": options.sequence,
         "structure": structure,
         "energy_kcal_per_mol": energy,
-        "cells": len(args.sequence) ** 2,
+        "cells": len(options.sequence) ** 2,
     }
 
 
-def _run_cofold(args) -> dict:
+def _run_cofold(options) -> dict:
     """Aligns and folds the pair together, returning the record the renderer prints."""
     first_gapped, second_gapped, structure, score = sankoff_cofold(
-        args.first,
-        args.second,
-        match=args.match,
-        mismatch=args.mismatch,
-        gap=args.gap,
-        backend=args.backend,
-        device=args.device,
-        placement=Placement(device=args.device, gpu_id=args.gpu_id),
+        options.first,
+        options.second,
+        match=options.match,
+        mismatch=options.mismatch,
+        gap=options.gap,
+        backend=options.backend,
+        device=options.device,
+        placement=Placement(device=options.device, gpu_id=options.gpu_id),
     )
     return {
         "operation": Verb.COFOLD,
-        "first": args.first,
-        "second": args.second,
+        "first": options.first,
+        "second": options.second,
         "first_gapped": first_gapped,
         "second_gapped": second_gapped,
         "structure": structure,
         "score": score,
-        "cells": (len(args.first) * len(args.second)) ** 2,
+        "cells": (len(options.first) * len(options.second)) ** 2,
     }
 
 
@@ -888,45 +883,48 @@ def _report_placement(record: dict, backend: str, device: str, gpu_id: int, elap
     print(f"  throughput:  {rate:.2f} MCUPS", file=sys.stderr)
 
 
-def main():
-    """Parses one verb's arguments, runs it, and prints the answer."""
+def main(argv: list[str] | None = None):
+    """Parses one verb's arguments, runs it, and prints the answer.
+
+    Takes the vector rather than reading it, so a caller can drive the parser without a process.
+    """
     parser = _build_parser()
-    args = parser.parse_args()
-    if args.verb is None:
+    options = parser.parse_args(argv)
+    if options.verb is None:
         parser.print_help(sys.stderr)
         sys.exit(2)
-    verb = Verb(args.verb)
+    verb = Verb(options.verb)
 
     # Naming an accelerator is asking for one, so it settles the device the resolver would guess.
-    if args.gpu_id is not None and args.device is None:
-        args.device = Device.GPU
-    backend, device = _resolve(args.backend, args.device)
-    args.backend, args.device = backend, device
+    if options.gpu_id is not None and options.device is None:
+        options.device = Device.GPU
+    backend, device = _resolve(options.backend, options.device)
+    options.backend, options.device = backend, device
     try:
-        args.gpu_id = _named_accelerator(device, args.gpu_id)
+        options.gpu_id = _named_accelerator(device, options.gpu_id)
     except ValueError as contradiction:
         parser.error(str(contradiction))
     try:
         started = time.perf_counter()
-        record = RUNNERS[verb](args)
+        record = RUNNERS[verb](options)
         elapsed = time.perf_counter() - started
     except SystemExit:
         raise
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    except Exception as failure:
+        print(f"Error: {failure}", file=sys.stderr)
         sys.exit(1)
 
-    if args.format is Format.JSON:
+    if options.format is Format.JSON:
         payload = {key: value for key, value in record.items() if key != "cells"}
         payload["backend"], payload["device"] = backend, device
-        payload["gpu_id"] = args.gpu_id
+        payload["gpu_id"] = options.gpu_id
         if verb is Verb.ALIGN:
-            payload["threads"] = args.threads
+            payload["threads"] = options.threads
         print(json.dumps(payload))
     else:
-        print(_render(record, args.color))
-    if args.verbose:
-        _report_placement(record, backend, device, args.gpu_id, elapsed)
+        print(_render(record, options.color))
+    if options.verbose:
+        _report_placement(record, backend, device, options.gpu_id, elapsed)
 
 
 # endregion Command Line

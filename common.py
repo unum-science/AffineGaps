@@ -12,22 +12,22 @@ from enum import StrEnum
 import numpy as np
 
 try:
-    import numba as nb
+    import numba
 except ImportError:
-    nb = None
+    numba = None
 
-HAS_NUMBA = nb is not None
+HAS_NUMBA = numba is not None
 """Whether NumBa is installed, which decides if the reference kernels are compiled."""
 
 
 def jit_if_available(*jit_args, **jit_kwargs):
     """Compiles with NumBa when it is installed, and leaves the function untouched when it is not."""
 
-    def decorator(func):
-        if nb is not None:
+    def decorator(kernel):
+        if numba is not None:
             # Cached to disk, so only the first process on a machine pays the compile.
-            return nb.jit(*jit_args, cache=True, nogil=True, **jit_kwargs)(func)
-        return func
+            return numba.jit(*jit_args, cache=True, nogil=True, **jit_kwargs)(kernel)
+        return kernel
 
     return decorator
 
@@ -154,11 +154,13 @@ class GpuSpecs:
     shared_memory_per_multiprocessor: int
     """Bytes of shared memory one multiprocessor holds, which is what bounds a strip's carry."""
     reserved_memory_per_block: int
-    """The slice of that the driver keeps, measured on this target rather than reported by it."""
+    """The slice of that a block may not opt into, which the card reports rather than us guessing."""
     largest_allocation: int
     """The biggest single buffer this device hands out, which is `maxBufferLength` on Metal."""
     streaming_multiprocessors: int
     """How many multiprocessors a grid has to fill."""
+    max_blocks_per_multiprocessor: int
+    """How many blocks one multiprocessor holds at once, which is what a level aims to saturate."""
 
 
 default_proteins_alphabet: str = "ARNDCQEGHILKMFPSTWYVBZX"

@@ -45,9 +45,9 @@ from errors import AffineGapsError, ErrorKind
 from folding import FoldResult, device_fold, serial_fold
 from cofolding import (
     CofoldResult,
-    DEFAULT_GAP,
-    DEFAULT_MATCH,
-    DEFAULT_MISMATCH,
+    DEFAULT_SANKOFF_GAP,
+    DEFAULT_SANKOFF_MATCH,
+    DEFAULT_SANKOFF_MISMATCH,
     SankoffScoring,
     device_cofold,
     serial_cofold,
@@ -133,51 +133,47 @@ def protein_defaults(gaps: PythonObject) raises -> Tuple[String, Int, AffineGapC
 
 def alignment_triple(first_gapped: String, second_gapped: String, score: Int32) raises -> PythonObject:
     """The shape every alignment entry point returns: both gapped strings and the score."""
-    var triple = Python().list()
-    triple.append(PythonObject(first_gapped))
-    triple.append(PythonObject(second_gapped))
-    triple.append(PythonObject(Int(score)))
-    return triple
+    var gapped_pair = Python().list()
+    gapped_pair.append(PythonObject(first_gapped))
+    gapped_pair.append(PythonObject(second_gapped))
+    gapped_pair.append(PythonObject(Int(score)))
+    return gapped_pair
 
 
 def gotoh_score[
     mode: AlignmentMode
-](first: PythonObject, second: PythonObject, substitution: PythonObject, gaps: PythonObject,) raises -> PythonObject:
+](first: PythonObject, second: PythonObject, substitution: PythonObject, gaps: PythonObject) raises -> PythonObject:
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var left = translate(String(first), alphabet)
-    var right = translate(String(second), alphabet)
-    return PythonObject(Int(serial_score[mode](left, right, substitutions, alphabet_size, scoring)))
+    var encoded_first = translate(String(first), alphabet)
+    var encoded_second = translate(String(second), alphabet)
+    return PythonObject(Int(serial_score[mode](encoded_first, encoded_second, substitutions, alphabet_size, scoring)))
 
 
 def gotoh_score_linear_gpu[
     mode: AlignmentMode
 ](
-    first: PythonObject,
-    second: PythonObject,
-    substitution: PythonObject,
-    gaps: PythonObject,
-    scope: DeviceScope,
+    first: PythonObject, second: PythonObject, substitution: PythonObject, gaps: PythonObject, scope: DeviceScope
 ) raises -> PythonObject:
     """One pair scored with every sweep on the device, for a pair too tall for one block's carry."""
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var left = translate(String(first), alphabet)
-    var right = translate(String(second), alphabet)
-    var score = device_score[mode](scope, left, right, substitutions, alphabet_size, scoring)
+    var encoded_first = translate(String(first), alphabet)
+    var encoded_second = translate(String(second), alphabet)
+    var score = device_score[mode](scope, encoded_first, encoded_second, substitutions, alphabet_size, scoring)
     return PythonObject(Int(score))
 
 
 def gotoh_alignment[
     mode: AlignmentMode
-](first: PythonObject, second: PythonObject, substitution: PythonObject, gaps: PythonObject,) raises -> PythonObject:
+](first: PythonObject, second: PythonObject, substitution: PythonObject, gaps: PythonObject) raises -> PythonObject:
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var left = translate(String(first), alphabet)
-    var right = translate(String(second), alphabet)
-    var result = serial_align[mode](left, right, substitutions, alphabet_size, scoring, alphabet)
-    var triple = alignment_triple(result.first_gapped, result.second_gapped, result.score)
-    return triple
+    var encoded_first = translate(String(first), alphabet)
+    var encoded_second = translate(String(second), alphabet)
+    var aligned = serial_align[mode](encoded_first, encoded_second, substitutions, alphabet_size, scoring, alphabet)
+    var gapped_pair = alignment_triple(aligned.first_gapped, aligned.second_gapped, aligned.score)
+    return gapped_pair
 
 
 def python_length(value: PythonObject) raises -> Int:
@@ -205,11 +201,11 @@ def pack_batch(firsts: PythonObject, seconds: PythonObject, alphabet: String) ra
     var offsets = List[Scalar[OffsetDType]]()
     offsets.append(0)
     for index in range(pairs):
-        var left = translate(String(firsts[index]), alphabet)
-        sequences.extend(left^)
+        var encoded_first = translate(String(firsts[index]), alphabet)
+        sequences.extend(encoded_first^)
         offsets.append(Scalar[OffsetDType](len(sequences)))
-        var right = translate(String(seconds[index]), alphabet)
-        sequences.extend(right^)
+        var encoded_second = translate(String(seconds[index]), alphabet)
+        sequences.extend(encoded_second^)
         offsets.append(Scalar[OffsetDType](len(sequences)))
     return BatchTape(sequences^, offsets^)
 
@@ -217,11 +213,7 @@ def pack_batch(firsts: PythonObject, seconds: PythonObject, alphabet: String) ra
 def gotoh_scores_batch[
     mode: AlignmentMode
 ](
-    firsts: PythonObject,
-    seconds: PythonObject,
-    substitution: PythonObject,
-    gaps: PythonObject,
-    scope: DeviceScope,
+    firsts: PythonObject, seconds: PythonObject, substitution: PythonObject, gaps: PythonObject, scope: DeviceScope
 ) raises -> PythonObject:
     """Scores a whole batch on the GPU, one thread block per pair.
 
@@ -241,20 +233,16 @@ def gotoh_scores_batch[
     var tape = pack_batch(firsts, seconds, alphabet)
 
     var scores = device_scores[mode](scope, tape.sequences, tape.offsets, substitutions, alphabet_size, scoring)
-    var output = Python().list()
+    var scored = Python().list()
     for index in range(len(scores)):
-        output.append(PythonObject(Int(scores[index])))
-    return output
+        scored.append(PythonObject(Int(scores[index])))
+    return scored
 
 
 def gotoh_alignments_batch[
     mode: AlignmentMode
 ](
-    firsts: PythonObject,
-    seconds: PythonObject,
-    substitution: PythonObject,
-    gaps: PythonObject,
-    scope: DeviceScope,
+    firsts: PythonObject, seconds: PythonObject, substitution: PythonObject, gaps: PythonObject, scope: DeviceScope
 ) raises -> PythonObject:
     """Aligns a whole batch on the GPU, returning `[first_gapped, second_gapped, score]` triples.
 
@@ -272,11 +260,13 @@ def gotoh_alignments_batch[
     var tape = pack_batch(firsts, seconds, alphabet)
 
     var aligned = device_alignments[mode](scope, tape.sequences, tape.offsets, substitutions, alphabet, scoring)
-    var output = Python().list()
+    var alignments = Python().list()
     for index in range(len(aligned)):
-        var triple = alignment_triple(aligned[index].first_gapped, aligned[index].second_gapped, aligned[index].score)
-        output.append(triple)
-    return output
+        var gapped_pair = alignment_triple(
+            aligned[index].first_gapped, aligned[index].second_gapped, aligned[index].score
+        )
+        alignments.append(gapped_pair)
+    return alignments
 
 
 def combined_alphabet(first: String, second: String) -> String:
@@ -305,28 +295,28 @@ def levenshtein_alignment(first: PythonObject, second: PythonObject) raises -> P
     the maximizing Gotoh recurrence into the negated Levenshtein minimization, tie-break chain
     included, so this needs no kernel of its own.
     """
-    var left = String(first)
-    var right = String(second)
-    for byte in left.as_bytes():
+    var first_text = String(first)
+    var second_text = String(second)
+    for byte in first_text.as_bytes():
         if byte >= 0x80:
             raise AffineGapsError(ErrorKind.NOT_ASCII, "unit-cost alignment")
-    for byte in right.as_bytes():
+    for byte in second_text.as_bytes():
         if byte >= 0x80:
             raise AffineGapsError(ErrorKind.NOT_ASCII, "unit-cost alignment")
-    var alphabet = combined_alphabet(left, right)
+    var alphabet = combined_alphabet(first_text, second_text)
     var alphabet_size = alphabet.byte_length()
     var substitutions = uniform_matrix(alphabet_size, 0, -1)
     var scoring = AffineGapCosts.checked(Int32(-1), Int32(-1))
-    var encoded_left = translate(left, alphabet)
-    var encoded_right = translate(right, alphabet)
-    var result = serial_align[AlignmentMode.GLOBAL](
-        encoded_left, encoded_right, substitutions, alphabet_size, scoring, alphabet
+    var encoded_first = translate(first_text, alphabet)
+    var encoded_second = translate(second_text, alphabet)
+    var aligned = serial_align[AlignmentMode.GLOBAL](
+        encoded_first, encoded_second, substitutions, alphabet_size, scoring, alphabet
     )
-    var triple = Python().list()
-    triple.append(PythonObject(result.first_gapped))
-    triple.append(PythonObject(result.second_gapped))
-    triple.append(PythonObject(-Int(result.score)))
-    return triple
+    var gapped_pair = Python().list()
+    gapped_pair.append(PythonObject(aligned.first_gapped))
+    gapped_pair.append(PythonObject(aligned.second_gapped))
+    gapped_pair.append(PythonObject(-Int(aligned.score)))
+    return gapped_pair
 
 
 def gpu_specs(gpu_id: PythonObject) raises -> PythonObject:
@@ -337,6 +327,16 @@ def gpu_specs(gpu_id: PythonObject) raises -> PythonObject:
     reported.append(PythonObject(scope.specs.reserved_memory_per_block))
     reported.append(PythonObject(scope.specs.largest_allocation))
     reported.append(PythonObject(scope.specs.streaming_multiprocessors))
+    reported.append(PythonObject(scope.specs.max_blocks_per_multiprocessor))
+    return reported
+
+
+def proteins_matrix() raises -> PythonObject:
+    """The compiled default table, flat and row-major, so a test can hold it against the reference."""
+    var table = default_proteins_matrix()
+    var reported = Python().list()
+    for index in range(len(table)):
+        reported.append(PythonObject(Int(table[index])))
     return reported
 
 
@@ -348,16 +348,16 @@ def zuker_fold(sequence: PythonObject, requested: PythonObject) raises -> Python
     """
     var text = String(sequence)
     var placement = placement_from(requested)
-    var result: FoldResult
+    var aligned: FoldResult
     if String(requested.device) == "gpu":
         var scope = DeviceScope(placement.gpu_id)
-        result = device_fold(scope, text)
+        aligned = device_fold(scope, text)
     else:
-        result = serial_fold(text)
+        aligned = serial_fold(text)
 
     var couple = Python().list()
-    couple.append(PythonObject(result.structure))
-    couple.append(PythonObject(Float64(Int(result.decikcal)) / 10.0))
+    couple.append(PythonObject(aligned.structure))
+    couple.append(PythonObject(Float64(Int(aligned.decikcal)) / 10.0))
     return couple
 
 
@@ -374,26 +374,26 @@ def sankoff_cofold(
     Returns both gapped sequences, the dot-bracket structure they agree on, and the score. Memory
     grows as the fourth power of the sequence length, so this is bounded to a few hundred bases.
     """
-    var scoring = SankoffScoring(Int32(optional_int(gap).or_else(Int(DEFAULT_GAP))))
-    var match_score = optional_int(match_reward).or_else(Int(DEFAULT_MATCH))
-    var mismatch_score = optional_int(mismatch_penalty).or_else(Int(DEFAULT_MISMATCH))
+    var scoring = SankoffScoring(Int32(optional_int(gap).or_else(Int(DEFAULT_SANKOFF_GAP))))
+    var match_score = optional_int(match_reward).or_else(Int(DEFAULT_SANKOFF_MATCH))
+    var mismatch_score = optional_int(mismatch_penalty).or_else(Int(DEFAULT_SANKOFF_MISMATCH))
     var alphabet = String(DEFAULT_RNA_ALPHABET)
-    var left = String(first)
-    var right = String(second)
+    var encoded_first = String(first)
+    var encoded_second = String(second)
 
     var placement = placement_from(requested)
-    var result: CofoldResult
+    var aligned: CofoldResult
     if String(requested.device) == "gpu":
         var scope = DeviceScope(placement.gpu_id)
-        result = device_cofold(scope, left, right, alphabet, scoring, match_score, mismatch_score)
+        aligned = device_cofold(scope, encoded_first, encoded_second, alphabet, scoring, match_score, mismatch_score)
     else:
-        result = serial_cofold(left, right, alphabet, scoring, match_score, mismatch_score)
+        aligned = serial_cofold(encoded_first, encoded_second, alphabet, scoring, match_score, mismatch_score)
 
     var quadruple = Python().list()
-    quadruple.append(PythonObject(result.gapped_first))
-    quadruple.append(PythonObject(result.gapped_second))
-    quadruple.append(PythonObject(result.structure))
-    quadruple.append(PythonObject(Int(result.score)))
+    quadruple.append(PythonObject(aligned.gapped_first))
+    quadruple.append(PythonObject(aligned.gapped_second))
+    quadruple.append(PythonObject(aligned.structure))
+    quadruple.append(PythonObject(Int(aligned.score)))
     return quadruple
 
 
@@ -407,10 +407,7 @@ def colorize_alignment(first_gapped: PythonObject, second_gapped: PythonObject) 
 
 
 def needleman_wunsch_gotoh_alignment_linear(
-    first: PythonObject,
-    second: PythonObject,
-    substitution: PythonObject,
-    gaps: PythonObject,
+    first: PythonObject, second: PythonObject, substitution: PythonObject, gaps: PythonObject
 ) raises -> PythonObject:
     """Global alignment in linear space, splitting rows and joining halves Myers-Miller style.
 
@@ -421,18 +418,18 @@ def needleman_wunsch_gotoh_alignment_linear(
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
     var cells = DEFAULT_LEAF_CELLS
-    var left = translate(String(first), alphabet)
-    var right = translate(String(second), alphabet)
+    var encoded_first = translate(String(first), alphabet)
+    var encoded_second = translate(String(second), alphabet)
 
-    var path_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
-    var path_layers = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
+    var path_columns = List[Int32](length=len(encoded_first) + 1, fill=Int32(0))
+    var path_layers = List[Layer](length=len(encoded_first) + 1, fill=Layer.ALIGNING)
     serial_hirschberg(
-        left,
-        right,
+        encoded_first,
+        encoded_second,
         0,
-        len(left),
+        len(encoded_first),
         0,
-        len(right),
+        len(encoded_second),
         substitutions,
         alphabet_size,
         scoring,
@@ -440,10 +437,21 @@ def needleman_wunsch_gotoh_alignment_linear(
         path_columns,
         path_layers,
     )
-    var score = score_path(left, right, path_columns, path_layers, substitutions, alphabet_size, scoring, len(left))
-    var expanded = expand_path(left, right, path_columns, path_layers, alphabet, AlignmentMode.GLOBAL, 0, len(left))
-    var triple = alignment_triple(expanded[0], expanded[1], score)
-    return triple
+    var score = score_path(
+        encoded_first,
+        encoded_second,
+        path_columns,
+        path_layers,
+        substitutions,
+        alphabet_size,
+        scoring,
+        len(encoded_first),
+    )
+    var expanded = expand_path(
+        encoded_first, encoded_second, path_columns, path_layers, alphabet, AlignmentMode.GLOBAL, 0, len(encoded_first)
+    )
+    var gapped_pair = alignment_triple(expanded[0], expanded[1], score)
+    return gapped_pair
 
 
 def needleman_wunsch_gotoh_alignment_linear_gpu(
@@ -457,12 +465,12 @@ def needleman_wunsch_gotoh_alignment_linear_gpu(
     """Global alignment in linear space with every sweep running on the device."""
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var left = translate(String(first), alphabet)
-    var right = translate(String(second), alphabet)
-    var result = device_align[AlignmentMode.GLOBAL](
+    var encoded_first = translate(String(first), alphabet)
+    var encoded_second = translate(String(second), alphabet)
+    var aligned = device_align[AlignmentMode.GLOBAL](
         scope,
-        left,
-        right,
+        encoded_first,
+        encoded_second,
         substitutions,
         alphabet_size,
         scoring,
@@ -470,20 +478,17 @@ def needleman_wunsch_gotoh_alignment_linear_gpu(
         DEFAULT_LEAF_CELLS,
         placement,
     )
-    return alignment_triple(result.first_gapped, result.second_gapped, result.score)
+    return alignment_triple(aligned.first_gapped, aligned.second_gapped, aligned.score)
 
 
 def smith_waterman_gotoh_alignment_linear(
-    first: PythonObject,
-    second: PythonObject,
-    substitution: PythonObject,
-    gaps: PythonObject,
+    first: PythonObject, second: PythonObject, substitution: PythonObject, gaps: PythonObject
 ) raises -> PythonObject:
     """Local alignment in linear space, by reduction to the global problem.
 
     A forward local sweep finds where the best alignment ends, a backward sweep over those
     prefixes finds where it starts, and the global recursion then runs on that rectangle alone.
-    The untrimmed flanks the Python leaves in front of a local result are filled in afterwards.
+    The untrimmed flanks the Python leaves in front of a local aligned are filled in afterwards.
 
     Hirschberg can in fact be aimed at a local matrix directly, at twice the cell count and the
     same linear space — the local optimum is a maximum over sub-rectangles, so the join gains
@@ -494,33 +499,33 @@ def smith_waterman_gotoh_alignment_linear(
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
     var cells = DEFAULT_LEAF_CELLS
-    var left = translate(String(first), alphabet)
-    var right = translate(String(second), alphabet)
+    var encoded_first = translate(String(first), alphabet)
+    var encoded_second = translate(String(second), alphabet)
 
     var last_row, last_column, score = serial_local_extremum[SweepHalf.FORWARD](
-        left, right, len(left), len(right), substitutions, alphabet_size, scoring
+        encoded_first, encoded_second, len(encoded_first), len(encoded_second), substitutions, alphabet_size, scoring
     )
 
-    var path_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
-    var path_layers = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
+    var path_columns = List[Int32](length=len(encoded_first) + 1, fill=Int32(0))
+    var path_layers = List[Layer](length=len(encoded_first) + 1, fill=Layer.ALIGNING)
 
     var first_row = last_row
     if score > 0:
         var back_rows, back_columns, _ = serial_local_extremum[SweepHalf.REVERSE](
-            left, right, last_row, last_column, substitutions, alphabet_size, scoring
+            encoded_first, encoded_second, last_row, last_column, substitutions, alphabet_size, scoring
         )
         first_row = last_row - back_rows
         var first_column = last_column - back_columns
 
         path_columns[last_row] = Int32(last_column)
-        var core_columns = List[Int32](length=len(left) + 1, fill=Int32(0))
-        var core_layers = List[Layer](length=len(left) + 1, fill=Layer.ALIGNING)
+        var core_columns = List[Int32](length=len(encoded_first) + 1, fill=Int32(0))
+        var core_layers = List[Layer](length=len(encoded_first) + 1, fill=Layer.ALIGNING)
         for index in range(len(path_columns)):
             core_columns[index] = path_columns[index]
             core_layers[index] = path_layers[index]
         serial_hirschberg(
-            left,
-            right,
+            encoded_first,
+            encoded_second,
             first_row,
             last_row,
             first_column,
@@ -537,10 +542,10 @@ def smith_waterman_gotoh_alignment_linear(
             path_layers[index] = core_layers[index]
 
     var expanded = expand_path(
-        left, right, path_columns, path_layers, alphabet, AlignmentMode.LOCAL, first_row, last_row
+        encoded_first, encoded_second, path_columns, path_layers, alphabet, AlignmentMode.LOCAL, first_row, last_row
     )
-    var triple = alignment_triple(expanded[0], expanded[1], score)
-    return triple
+    var gapped_pair = alignment_triple(expanded[0], expanded[1], score)
+    return gapped_pair
 
 
 def smith_waterman_gotoh_alignment_linear_gpu(
@@ -554,12 +559,12 @@ def smith_waterman_gotoh_alignment_linear_gpu(
     """Local alignment in linear space with every sweep running on the device."""
     var alphabet, alphabet_size, scoring = protein_defaults(gaps)
     var substitutions = matrix_from(substitution, alphabet_size)
-    var left = translate(String(first), alphabet)
-    var right = translate(String(second), alphabet)
-    var result = device_align[AlignmentMode.LOCAL](
+    var encoded_first = translate(String(first), alphabet)
+    var encoded_second = translate(String(second), alphabet)
+    var aligned = device_align[AlignmentMode.LOCAL](
         scope,
-        left,
-        right,
+        encoded_first,
+        encoded_second,
         substitutions,
         alphabet_size,
         scoring,
@@ -567,7 +572,7 @@ def smith_waterman_gotoh_alignment_linear_gpu(
         DEFAULT_LEAF_CELLS,
         placement,
     )
-    return alignment_triple(result.first_gapped, result.second_gapped, result.score)
+    return alignment_triple(aligned.first_gapped, aligned.second_gapped, aligned.score)
 
 
 def mode_from(value: PythonObject) raises -> AlignmentMode:
@@ -815,6 +820,7 @@ def PyInit_affinegaps_mojo() abi("C") -> PythonObject:
         builder.def_function[sankoff_cofold]("sankoff_cofold")
         builder.def_function[zuker_fold]("zuker_fold")
         builder.def_function[gpu_specs]("gpu_specs")
+        builder.def_function[proteins_matrix]("proteins_matrix")
         return builder.finalize()
     except error:
         abort(String("Failed to initialize affinegaps_mojo: ", error))

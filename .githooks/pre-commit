@@ -196,10 +196,10 @@ check_python_format() {
     [ ${#python_staged[@]} -gt 0 ] || return 0
     command -v uvx > /dev/null 2>&1 || return 0
     local hits
-    hits=$(uvx black --line-length 120 --check "${python_staged[@]}" 2>&1 | grep '^would reformat' || true)
+    hits=$(uvx black --line-length 120 --skip-magic-trailing-comma --check "${python_staged[@]}" 2>&1 | grep '^would reformat' || true)
     [ -z "$hits" ] || fail "$hits"$'\n' \
         "staged Python is not black-clean." \
-        "            Run: uvx black --line-length 120 *.py"
+        "            Run: uvx black --line-length 120 --skip-magic-trailing-comma *.py"
     hits=$(uvx ruff check "${python_staged[@]}" 2>&1 | grep -E '^[^ ].*:[0-9]+:[0-9]+:' || true)
     [ -z "$hits" ] || fail "$hits"$'\n' \
         "staged Python does not pass ruff." \

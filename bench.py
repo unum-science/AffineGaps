@@ -149,7 +149,10 @@ def sample_family(
     subsets are therefore unrecoverable.
     """
     admitted = [read_structure(root / f"{stem}.ct") for stem in read_family_index(family, root)]
-    admitted = sorted((e for e in admitted if len(e.sequence) <= length_limit), key=lambda e: e.name)
+    admitted = sorted(
+        (structure for structure in admitted if len(structure.sequence) <= length_limit),
+        key=lambda structure: structure.name,
+    )
     if len(admitted) <= count:
         return admitted
     return random.Random(seed).sample(admitted, count)
@@ -328,10 +331,7 @@ def dot_bracket_of_ct(path: Path) -> str:
 
 
 def fold_with_rnastructure(
-    sequence: str,
-    name: str,
-    workspace: Path,
-    objective: FoldObjective = FoldObjective.MATCHED,
+    sequence: str, name: str, workspace: Path, objective: FoldObjective = FoldObjective.MATCHED
 ) -> str:
     """Folds one sequence with `Fold`, returning dot-bracket over the same positions."""
     source = write_sequence(workspace / f"{name}.seq", name, sequence)
@@ -371,12 +371,7 @@ def fold_with_seqfold(sequence: str) -> str:
 
 
 def cofold_with_dynalign(
-    first: str,
-    second: str,
-    workspace: Path,
-    *,
-    separation: int | None = None,
-    gap_penalty: float = 0.4,
+    first: str, second: str, workspace: Path, *, separation: int | None = None, gap_penalty: float = 0.4
 ) -> tuple[str, str]:
     """Runs `dynalign` unbanded and unpruned, which is slower than its defaults and is the point.
 
@@ -449,9 +444,7 @@ class FamilyDifference:
 
 
 def score_folding(
-    structures: list[Structure],
-    predictions: list[str],
-    matching: PairMatching = PairMatching.FLEXIBLE,
+    structures: list[Structure], predictions: list[str], matching: PairMatching = PairMatching.FLEXIBLE
 ) -> tuple[FamilyAccuracy, list[float]]:
     """Scores one contestant's structures against their references, keeping the per-sequence F1."""
     sensitivities, precisions, scores, unreachable = [], [], [], []
@@ -505,10 +498,13 @@ def sweep_folding(options, fold_one) -> dict:
             if not drawn:
                 continue
             mine = [fold_one(entry.sequence) for entry in drawn]
-            rival = [fold_with_rnastructure(e.sequence, e.name, workspace, options.objective) for e in drawn]
+            rival = [
+                fold_with_rnastructure(structure.sequence, structure.name, workspace, options.objective)
+                for structure in drawn
+            ]
             my_summary, my_scores = score_folding(drawn, mine, options.matching)
             their_summary, their_scores = score_folding(drawn, rival, options.matching)
-            gaps = [a - b for a, b in zip(my_scores, their_scores, strict=True)]
+            gaps = [mine - theirs for mine, theirs in zip(my_scores, their_scores, strict=True)]
             ours.append(my_summary)
             theirs.append(their_summary)
             differences.append(FamilyDifference(family, _mean(gaps), _standard_error(gaps)))
@@ -570,9 +566,9 @@ class GpuActivity:
     idle clock, and both have produced wrong numbers here.
     """
 
-    sm_activity: float
+    streaming_multiprocessor_activity: float
     """Share of elapsed time at least one warp was resident on an SM."""
-    sm_occupancy: float
+    streaming_multiprocessor_occupancy: float
     """Share of the resident warp slots that were filled, which is the real parallelism."""
     dram_activity: float
     """Share of elapsed time the memory interface was moving data."""
@@ -587,9 +583,7 @@ def _nvidia_query(fields: str) -> list[str]:
     if shutil.which("nvidia-smi") is None:
         return []
     result = subprocess.run(
-        ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
-        capture_output=True,
-        text=True,
+        ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"], capture_output=True, text=True
     )
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
@@ -675,10 +669,7 @@ def sample_activity(call, seconds_hint: float) -> tuple[float, GpuActivity | Non
     if shutil.which("dcgmi") is None or seconds_hint <= 0.2:
         return 0.0, None
     sampler = subprocess.Popen(
-        ["dcgmi", "dmon", "-e", fields, "-d", "100"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
+        ["dcgmi", "dmon", "-e", fields, "-d", "100"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
     )
     started = time.perf_counter()
     call()
@@ -697,8 +688,8 @@ def sample_activity(call, seconds_hint: float) -> tuple[float, GpuActivity | Non
     columns = list(zip(*readings, strict=True))
     means = [sum(column) / len(column) for column in columns]
     return elapsed, GpuActivity(
-        sm_activity=means[0],
-        sm_occupancy=means[1],
+        streaming_multiprocessor_activity=means[0],
+        streaming_multiprocessor_occupancy=means[1],
         dram_activity=means[2],
         power_watts=means[3],
         clock_mhz=int(means[4]),
@@ -824,7 +815,8 @@ def sweep_pair_speed(options, pair_call, count_candidates, alphabet, fold_one) -
         if activity is not None:
             row["activity"] = asdict(activity)
             shown.append(
-                f"[sm {activity.sm_activity:.2f} occ {activity.sm_occupancy:.2f} "
+                f"[sm {activity.streaming_multiprocessor_activity:.2f} "
+                f"occ {activity.streaming_multiprocessor_occupancy:.2f} "
                 f"dram {activity.dram_activity:.2f} {activity.power_watts:.0f}W {activity.clock_mhz}MHz]"
             )
         rows.append(row)
@@ -862,12 +854,13 @@ def sweep_speed(options, fold_one) -> dict:
             # Every contestant is rated against this project's candidate count, so a rate compares
             # tools on the same work rather than each on its own recurrence.
             shown = [f"length={length}", f"candidates={candidates:,}"]
-            for key in ("affinegaps", "viennarna", "rnastructure", "seqfold"):
-                if key in row:
-                    shown.append(f"{key}={row[key]:.4g} ({candidates / row[key] / 1e9:.3g} GCUPS)")
+            for contestant in ("affinegaps", "viennarna", "rnastructure", "seqfold"):
+                if contestant in row:
+                    shown.append(f"{contestant}={row[contestant]:.4g} ({candidates / row[contestant] / 1e9:.3g} GCUPS)")
             if activity is not None:
                 shown.append(
-                    f"[sm {activity.sm_activity:.2f} occ {activity.sm_occupancy:.2f} "
+                    f"[sm {activity.streaming_multiprocessor_activity:.2f} "
+                    f"occ {activity.streaming_multiprocessor_occupancy:.2f} "
                     f"dram {activity.dram_activity:.2f} {activity.power_watts:.0f}W {activity.clock_mhz}MHz]"
                 )
             print("  ".join(shown), flush=True)

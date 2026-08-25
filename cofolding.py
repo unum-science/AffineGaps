@@ -375,10 +375,18 @@ def _sankoff_traceback(
             return "", "", ""
         if window_first == 0:
             span = range(start_second, start_second + window_second)
-            return "-" * window_second, "".join(alphabet[encoded_second[i]] for i in span), "." * window_second
+            return (
+                "-" * window_second,
+                "".join(alphabet[encoded_second[position]] for position in span),
+                "." * window_second,
+            )
         if window_second == 0:
             span = range(start_first, start_first + window_first)
-            return "".join(alphabet[encoded_first[i]] for i in span), "-" * window_first, "." * window_first
+            return (
+                "".join(alphabet[encoded_first[position]] for position in span),
+                "-" * window_first,
+                "." * window_first,
+            )
 
         case, reach_first, reach_second = _winning_case(
             table,
@@ -470,12 +478,6 @@ def sankoff_cofold(
         gapped_second = "-" * len(first) + second
         return gapped_first, gapped_second, "." * (len(first) + len(second)), score
     aligned_first, aligned_second, structure = _sankoff_traceback(
-        table,
-        encoded_first,
-        encoded_second,
-        substitution_matrix,
-        pairs,
-        gap,
-        alphabet,
+        table, encoded_first, encoded_second, substitution_matrix, pairs, gap, alphabet
     )
     return aligned_first, aligned_second, structure, score

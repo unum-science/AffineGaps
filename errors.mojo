@@ -57,6 +57,15 @@ struct ErrorKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writabl
         else:
             writer.write("an unnamed failure")
 
+    def exit_status(self) -> Int:
+        """Two where the caller's arguments were at fault, one where the library refused the request.
+
+        The split a shell branches on, and the one `affinegaps.py` already answers with.
+        """
+        if self == Self.INVALID_ARGUMENT:
+            return 2
+        return 1
+
 
 @fieldwise_init
 struct AffineGapsError(Copyable, ImplicitlyCopyable, Writable):

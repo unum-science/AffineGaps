@@ -8,6 +8,7 @@ belongs to `folding.mojo`.
 """
 
 from std.ffi import c_int, c_size_t, external_call
+from std.gpu.primitives.warp import WARP_SIZE
 from std.memory import stack_allocation
 from std.sys.info import CompilationTarget, num_logical_cores, size_of
 
@@ -38,6 +39,9 @@ comptime DEFAULT_PROTEINS_ALPHABET = "ARNDCQEGHILKMFPSTWYVBZX"
 comptime DEFAULT_RNA_ALPHABET = "ACGU"
 """The four RNA bases, ordered so a base doubles as its own index."""
 
+comptime RNA_ALPHABET_SIZE = DEFAULT_RNA_ALPHABET.byte_length()
+"""Bases that alphabet emits, which is the stride of every table indexed by one of them."""
+
 comptime OPEN_BYTE = Byte(ord("("))
 """Opens a base pair in dot-bracket notation."""
 comptime CLOSE_BYTE = Byte(ord(")"))
@@ -46,18 +50,18 @@ comptime UNPAIRED_BYTE = Byte(ord("."))
 """Marks an unpaired position in dot-bracket notation."""
 
 comptime THREADS_PER_BLOCK = 256
-"""Threads in every block this package launches."""
+"""Threads in a block launched for a block-wide reduction; the strip and tile sweeps launch one warp."""
+
+comptime WARPS_PER_BLOCK = THREADS_PER_BLOCK // WARP_SIZE
+"""Warps such a block holds, which is how many partial results a block-wide reduction combines."""
+
+comptime PositionDType = DType.int32
+"""Index into a sequence, wide enough for any input either recurrence can hold."""
 
 comptime MAX_ALPHABET_SIZE = 32
 """
 Caps the substitution table staged into shared memory. Thirty-two covers the twenty-three protein letters with room to
 spare, and costs one kilobyte per block.
-"""
-
-comptime SHARED_RESERVED = 1024
-"""
-A block may opt into all of a multiprocessor's shared memory but the kilobyte the driver keeps. Measured on this
-target: 227 kibibytes of dynamic shared memory launches, 228 does not.
 """
 
 comptime NEGATIVE_INFINITY = Int32.MIN // 4
@@ -140,23 +144,28 @@ struct GpuSpecs(ImplicitlyCopyable, TrivialRegisterPassable):
     var shared_memory_per_multiprocessor: Int
     """Bytes of shared memory one multiprocessor holds, which is what bounds a strip's carry."""
     var reserved_memory_per_block: Int
-    """The slice of that the driver keeps, measured on this target rather than reported by it."""
+    """The slice of that a block may not opt into, which the card reports rather than us guessing."""
     var largest_allocation: Int
     """The biggest single buffer this device hands out, which is `maxBufferLength` on Metal."""
     var streaming_multiprocessors: Int
     """How many multiprocessors a grid has to fill."""
+    var max_blocks_per_multiprocessor: Int
+    """How many blocks one multiprocessor holds at once, which is what a level aims to saturate."""
 
 
-def gpu_specs_fetch(ctx: DeviceContext) raises -> GpuSpecs:
+def gpu_specs_fetch(context: DeviceContext) raises -> GpuSpecs:
     """One cold query of the properties every sweep sizes itself from.
 
     Each is a live driver call, so they are asked together and once.
     """
+    var per_multiprocessor = Int(context.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
+    var per_block = Int(context.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_BLOCK_OPTIN))
     return GpuSpecs(
-        Int(ctx.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)),
-        SHARED_RESERVED,
-        Int(ctx.max_single_alloc_size()),
-        Int(ctx.get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT)),
+        per_multiprocessor,
+        per_multiprocessor - per_block,
+        Int(context.max_single_alloc_size()),
+        Int(context.get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT)),
+        Int(context.get_attribute(DeviceAttribute.MAX_BLOCKS_PER_MULTIPROCESSOR)),
     )
 
 

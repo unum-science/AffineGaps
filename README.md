@@ -231,7 +231,8 @@ Both choices are cost rather than correctness, and both are settled from what th
 ```python
 affinegaps.gpu_specs()
 > GpuSpecs(shared_memory_per_multiprocessor=233472, reserved_memory_per_block=1024,
->          largest_allocation=85028372480, streaming_multiprocessors=132)
+>   largest_allocation=85028372480, streaming_multiprocessors=132,
+>   max_blocks_per_multiprocessor=32)
 ```
 
 ### Aligning Two Sequences

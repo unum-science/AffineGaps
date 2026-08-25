@@ -30,7 +30,14 @@ from alignment import (
     device_align,
     serial_align,
 )
-from cofolding import SankoffScoring, device_cofold, serial_cofold
+from cofolding import (
+    DEFAULT_SANKOFF_GAP,
+    DEFAULT_SANKOFF_MATCH,
+    DEFAULT_SANKOFF_MISMATCH,
+    SankoffScoring,
+    device_cofold,
+    serial_cofold,
+)
 from common import (
     DEFAULT_PROTEINS_ALPHABET,
     DEFAULT_RNA_ALPHABET,
@@ -323,8 +330,11 @@ def aligned_pair[
 def run_align(arguments: List[String], mut options: Options) raises -> Int:
     """Aligns two sequences and prints the report."""
     if len(arguments) < 2 or arguments[0] == "--help":
-        print(USAGE_ALIGN)
-        return 0 if len(arguments) > 0 and arguments[0] == "--help" else 2
+        if len(arguments) > 0 and arguments[0] == "--help":
+            print(USAGE_ALIGN)
+            return 0
+        print(USAGE_ALIGN, file=FileDescriptor(2))
+        return 2
 
     var first_text = arguments[0]
     var second_text = arguments[1]
@@ -334,47 +344,52 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
     var match_score = Optional[Int]()
     var mismatch_score = Optional[Int]()
 
+    var placement = Placement.on_cpu(options.request.threads)
     var index = 2
-    while index < len(arguments):
-        var flag = arguments[index]
-        var value = arguments[index + 1] if index + 1 < len(arguments) else String("")
-        var taken = shared_flag(flag, value, options)
-        if taken > 0:
-            index += taken
-            continue
-        if flag == "--help":
-            print(USAGE_ALIGN)
-            return 0
-        if flag == "--local":
-            mode = AlignmentMode.LOCAL
-            index += 1
-            continue
-        if index + 1 >= len(arguments):
-            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs a value"))
-        var number = parse_int(value)
-        var numeric = flag == "--open" or flag == "--extend" or flag == "--match" or flag == "--mismatch"
-        if (numeric or flag == "--threads") and not number:
-            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs an integer [", value, "]"))
-        if flag == "--open":
-            opening = number.value()
-        elif flag == "--extend":
-            extension = number.value()
-        elif flag == "--match":
-            match_score = number
-        elif flag == "--mismatch":
-            mismatch_score = number
-        elif flag == "--threads":
-            if not number or number.value() < 0:
-                raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String("threads ", value))
-            options.request.threads = number.value()
-        else:
-            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, flag)
-        index += 2
+    try:
+        while index < len(arguments):
+            var flag = arguments[index]
+            var value = arguments[index + 1] if index + 1 < len(arguments) else String("")
+            var taken = shared_flag(flag, value, options)
+            if taken > 0:
+                index += taken
+                continue
+            if flag == "--help":
+                print(USAGE_ALIGN)
+                return 0
+            if flag == "--local":
+                mode = AlignmentMode.LOCAL
+                index += 1
+                continue
+            if index + 1 >= len(arguments):
+                raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs a value"))
+            var number = parse_int(value)
+            var numeric = flag == "--open" or flag == "--extend" or flag == "--match" or flag == "--mismatch"
+            if (numeric or flag == "--threads") and not number:
+                raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs an integer [", value, "]"))
+            if flag == "--open":
+                opening = number.value()
+            elif flag == "--extend":
+                extension = number.value()
+            elif flag == "--match":
+                match_score = number
+            elif flag == "--mismatch":
+                mismatch_score = number
+            elif flag == "--threads":
+                if not number or number.value() < 0:
+                    raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String("threads ", value))
+                options.request.threads = number.value()
+            else:
+                raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, flag)
+            index += 2
 
-    if Bool(match_score) != Bool(mismatch_score):
-        raise AffineGapsError(ErrorKind.INVALID_SCORING, "match without mismatch")
-
-    var placement = placement_of(options.request)
+        if Bool(match_score) != Bool(mismatch_score):
+            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, "match without mismatch")
+        # Turning what the flags named into a placement is the tail of reading them.
+        placement = placement_of(options.request)
+    except refusal:
+        print(String("Error: ", refusal), file=FileDescriptor(2))
+        return refusal.kind.exit_status()
 
     var alphabet = String(DEFAULT_PROTEINS_ALPHABET)
     var alphabet_size = alphabet.byte_length()
@@ -386,7 +401,7 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
     var right = translate(second_text, alphabet)
 
     var started = perf_counter_ns()
-    var result = aligned_pair[AlignmentMode.LOCAL](
+    var aligned = aligned_pair[AlignmentMode.LOCAL](
         left, right, substitutions, alphabet_size, scoring, alphabet, placement
     ) if mode == AlignmentMode.LOCAL else aligned_pair[AlignmentMode.GLOBAL](
         left, right, substitutions, alphabet_size, scoring, alphabet, placement
@@ -403,26 +418,26 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
                 quote("local" if mode == AlignmentMode.LOCAL else "global"),
                 quote(first_text),
                 quote(second_text),
-                quote(result.first_gapped),
-                quote(result.second_gapped),
-                Int(result.score),
+                quote(aligned.first_gapped),
+                quote(aligned.second_gapped),
+                Int(aligned.score),
                 quote("gpu" if placement.device == Device.GPU else "cpu"),
                 placement.gpu_id,
                 placement.threads,
             )
         )
     else:
-        var first_shown = result.first_gapped
-        var second_shown = result.second_gapped
+        var first_shown = aligned.first_gapped
+        var second_shown = aligned.second_gapped
         if wants_color(options.coloring):
-            var painted = colorize(result.first_gapped, result.second_gapped)
+            var painted = colorize(aligned.first_gapped, aligned.second_gapped)
             first_shown = painted[0]
             second_shown = painted[1]
         print(String("Sequence 1:  {}").format(first_text))
         print(String("Sequence 2:  {}").format(second_text))
         print(String("Alignment 1: {}").format(first_shown))
         print(String("Alignment 2: {}").format(second_shown))
-        print(String("Score:       {}").format(Int(result.score)))
+        print(String("Score:       {}").format(Int(aligned.score)))
 
     if options.verbose:
         report_placement(placement, options, len(left) * len(right), elapsed)
@@ -432,30 +447,39 @@ def run_align(arguments: List[String], mut options: Options) raises -> Int:
 def run_fold(arguments: List[String], mut options: Options) raises -> Int:
     """Folds one RNA sequence and prints the report."""
     if len(arguments) < 1 or arguments[0] == "--help":
-        print(USAGE_FOLD)
-        return 0 if len(arguments) > 0 else 2
-
-    var sequence_text = arguments[0]
-    var index = 1
-    while index < len(arguments):
-        var flag = arguments[index]
-        var value = arguments[index + 1] if index + 1 < len(arguments) else String("")
-        var taken = shared_flag(flag, value, options)
-        if taken > 0:
-            index += taken
-            continue
-        if flag == "--help":
+        if len(arguments) > 0:
             print(USAGE_FOLD)
             return 0
-        raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, flag)
+        print(USAGE_FOLD, file=FileDescriptor(2))
+        return 2
 
-    var placement = placement_of(options.request)
+    var sequence_text = arguments[0]
+    var placement = Placement.on_cpu(options.request.threads)
+    var index = 1
+    try:
+        while index < len(arguments):
+            var flag = arguments[index]
+            var value = arguments[index + 1] if index + 1 < len(arguments) else String("")
+            var taken = shared_flag(flag, value, options)
+            if taken > 0:
+                index += taken
+                continue
+            if flag == "--help":
+                print(USAGE_FOLD)
+                return 0
+            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, flag)
+        # Turning what the flags named into a placement is the tail of reading them.
+        placement = placement_of(options.request)
+    except refusal:
+        print(String("Error: ", refusal), file=FileDescriptor(2))
+        return refusal.kind.exit_status()
+
     var started = perf_counter_ns()
-    var result = device_fold(
+    var folded = device_fold(
         DeviceScope(placement.gpu_id), sequence_text
     ) if placement.device == Device.GPU else serial_fold(sequence_text)
     var elapsed = perf_counter_ns() - started
-    var energy = Float64(Int(result.decikcal)) / 10.0
+    var energy = Float64(Int(folded.decikcal)) / 10.0
 
     if options.format == Format.JSON:
         print(
@@ -464,7 +488,7 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
                 ' "backend": "mojo", "device": {}, "gpu_id": {}}}'
             ).format(
                 quote(sequence_text),
-                quote(result.structure),
+                quote(folded.structure),
                 energy,
                 quote("gpu" if placement.device == Device.GPU else "cpu"),
                 placement.gpu_id,
@@ -472,7 +496,7 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
         )
     else:
         print(String("Sequence:  {}").format(sequence_text))
-        print(String("Structure: {}").format(result.structure))
+        print(String("Structure: {}").format(folded.structure))
         print(String("Energy:    {} kcal/mol").format(energy))
 
     if options.verbose:
@@ -484,54 +508,57 @@ def run_fold(arguments: List[String], mut options: Options) raises -> Int:
 def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
     """Aligns and folds two RNA sequences together, and prints the report."""
     if len(arguments) < 2 or arguments[0] == "--help":
-        print(USAGE_COFOLD)
-        return 0 if len(arguments) > 0 and arguments[0] == "--help" else 2
+        if len(arguments) > 0 and arguments[0] == "--help":
+            print(USAGE_COFOLD)
+            return 0
+        print(USAGE_COFOLD, file=FileDescriptor(2))
+        return 2
 
     var first_text = arguments[0]
     var second_text = arguments[1]
-    var match_score = 2
-    var mismatch_score = -1
-    var gap = -2
+    var match_score = Int(DEFAULT_SANKOFF_MATCH)
+    var mismatch_score = Int(DEFAULT_SANKOFF_MISMATCH)
+    var gap = Int(DEFAULT_SANKOFF_GAP)
 
+    var placement = Placement.on_cpu(options.request.threads)
     var index = 2
-    while index < len(arguments):
-        var flag = arguments[index]
-        var value = arguments[index + 1] if index + 1 < len(arguments) else String("")
-        var taken = shared_flag(flag, value, options)
-        if taken > 0:
-            index += taken
-            continue
-        if flag == "--help":
-            print(USAGE_COFOLD)
-            return 0
-        if index + 1 >= len(arguments):
-            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs a value"))
-        var number = parse_int(value)
-        var numeric = flag == "--match" or flag == "--mismatch" or flag == "--gap"
-        if numeric and not number:
-            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs an integer [", value, "]"))
-        if flag == "--match":
-            match_score = number.value()
-        elif flag == "--mismatch":
-            mismatch_score = number.value()
-        elif flag == "--gap":
-            gap = number.value()
-        else:
-            raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, flag)
-        index += 2
+    try:
+        while index < len(arguments):
+            var flag = arguments[index]
+            var value = arguments[index + 1] if index + 1 < len(arguments) else String("")
+            var taken = shared_flag(flag, value, options)
+            if taken > 0:
+                index += taken
+                continue
+            if flag == "--help":
+                print(USAGE_COFOLD)
+                return 0
+            if index + 1 >= len(arguments):
+                raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs a value"))
+            var number = parse_int(value)
+            var numeric = flag == "--match" or flag == "--mismatch" or flag == "--gap"
+            if numeric and not number:
+                raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, String(flag, " needs an integer [", value, "]"))
+            if flag == "--match":
+                match_score = number.value()
+            elif flag == "--mismatch":
+                mismatch_score = number.value()
+            elif flag == "--gap":
+                gap = number.value()
+            else:
+                raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, flag)
+            index += 2
+        # Turning what the flags named into a placement is the tail of reading them.
+        placement = placement_of(options.request)
+    except refusal:
+        print(String("Error: ", refusal), file=FileDescriptor(2))
+        return refusal.kind.exit_status()
 
-    var placement = placement_of(options.request)
     var alphabet = String(DEFAULT_RNA_ALPHABET)
     var scoring = SankoffScoring(Int32(gap))
     var started = perf_counter_ns()
-    var result = device_cofold(
-        DeviceScope(placement.gpu_id),
-        first_text,
-        second_text,
-        alphabet,
-        scoring,
-        match_score,
-        mismatch_score,
+    var cofolded = device_cofold(
+        DeviceScope(placement.gpu_id), first_text, second_text, alphabet, scoring, match_score, mismatch_score
     ) if placement.device == Device.GPU else serial_cofold(
         first_text, second_text, alphabet, scoring, match_score, mismatch_score
     )
@@ -546,10 +573,10 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
             ).format(
                 quote(first_text),
                 quote(second_text),
-                quote(result.gapped_first),
-                quote(result.gapped_second),
-                quote(result.structure),
-                Int(result.score),
+                quote(cofolded.gapped_first),
+                quote(cofolded.gapped_second),
+                quote(cofolded.structure),
+                Int(cofolded.score),
                 quote("gpu" if placement.device == Device.GPU else "cpu"),
                 placement.gpu_id,
             )
@@ -557,8 +584,8 @@ def run_cofold(arguments: List[String], mut options: Options) raises -> Int:
     else:
         print(String("Sequence 1: {}").format(first_text))
         print(String("Sequence 2: {}").format(second_text))
-        print(String("Structure:  {}").format(result.structure))
-        print(String("Score:      {}").format(Int(result.score)))
+        print(String("Structure:  {}").format(cofolded.structure))
+        print(String("Score:      {}").format(Int(cofolded.score)))
 
     if options.verbose:
         var cells = first_text.byte_length() * second_text.byte_length()
@@ -575,33 +602,34 @@ def main():
     The status a verb computes becomes the process status, and a raised error prints to stderr, so
     a shell can branch on either and a piped payload stays parseable.
     """
-    var given = argv()
-    if len(given) < 2:
+    var value = argv()
+    if len(value) < 2:
         print(USAGE, file=FileDescriptor(2))
         exit(2)
 
-    var verb = String(given[1])
+    var verb = String(value[1])
     if verb == "--help":
         print(USAGE)
         return
 
-    var rest = List[String]()
-    for index in range(2, len(given)):
-        rest.append(String(given[index]))
+    var verb_arguments = List[String]()
+    for index in range(2, len(value)):
+        verb_arguments.append(String(value[index]))
 
     var options = Options.default()
     var status = 0
     try:
         if verb == "align":
-            status = run_align(rest, options)
+            status = run_align(verb_arguments, options)
         elif verb == "fold":
-            status = run_fold(rest, options)
+            status = run_fold(verb_arguments, options)
         elif verb == "cofold":
-            status = run_cofold(rest, options)
+            status = run_cofold(verb_arguments, options)
         else:
             print(USAGE, file=FileDescriptor(2))
             status = 2
     except error:
+        # Each verb catches its own usage errors, so whatever reaches here is a refused request.
         print(String("Error: ", error), file=FileDescriptor(2))
         status = 1
     if status != 0:

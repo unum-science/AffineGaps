@@ -10,7 +10,7 @@ nothing encloses. The first three are filled together in increasing window, beca
 Everything is indexed by `(start, length)` rather than by two endpoints, so a bifurcation reads
 strictly smaller lengths and every cell of a window is independent, which is what the device sweep
 needs. Memory is $O(n^2)$ and time is $O(n^3)$, the interior-loop term being bounded by capping a
-loop at `MAX_LOOP` unpaired bases as every implementation of this recurrence does.
+loop at `LOOP_LIMIT` unpaired bases as every implementation of this recurrence does.
 
 Energies are integer decikilocalories per mole throughout, so a fold is reproducible bit for bit.
 """
@@ -50,7 +50,6 @@ from turner import (
 
 # Turner's model caps a bulge or internal loop at thirty unpaired bases, which is also what turns
 # the interior-loop search from quartic into a constant-bounded scan.
-MAX_LOOP = LOOP_LIMIT
 
 # The backbone cannot reverse in fewer than three unpaired bases, so this floors every pair.
 MIN_TURN = 3
@@ -185,7 +184,7 @@ def _interior_energy(
         return FORBIDDEN
     unpaired_before = inner_start - start - 1
     unpaired_after = end - inner_end - 1
-    if unpaired_before + unpaired_after > MAX_LOOP:
+    if unpaired_before + unpaired_after > LOOP_LIMIT:
         return FORBIDDEN
     if unpaired_before == 0 and unpaired_after == 0:
         return STACK[outer, inner]
@@ -207,9 +206,9 @@ def _interior_energy(
 
 @jit_if_available(nopython=True)
 def _interior_end_floor(start: int, end: int, inner_start: int) -> int:
-    """The earliest inner end that keeps the loop within `MAX_LOOP` unpaired bases."""
+    """The earliest inner end that keeps the loop within `LOOP_LIMIT` unpaired bases."""
     unpaired_before = inner_start - start - 1
-    return max(end - 1 - (MAX_LOOP - unpaired_before), inner_start + MIN_CLOSING_REACH)
+    return max(end - 1 - (LOOP_LIMIT - unpaired_before), inner_start + MIN_CLOSING_REACH)
 
 
 @jit_if_available(nopython=True)
@@ -219,7 +218,7 @@ def _winning_interior(sequence: np.ndarray, paired: np.ndarray, start: int, wind
     stored = paired[start, window]
     closing = _closing_pair(sequence, start, end)
     for inner_start in range(start + 1, end):
-        if inner_start - start - 1 > MAX_LOOP:
+        if inner_start - start - 1 > LOOP_LIMIT:
             break
         for inner_end in range(_interior_end_floor(start, end, inner_start), end):
             inner_window = inner_end - inner_start + 1
@@ -302,7 +301,7 @@ def _paired_cell(sequence: np.ndarray, paired: np.ndarray, closable: np.ndarray,
     best = _hairpin_energy(sequence, start, end)
     closing = _closing_pair(sequence, start, end)
     for inner_start in range(start + 1, end):
-        if inner_start - start - 1 > MAX_LOOP:
+        if inner_start - start - 1 > LOOP_LIMIT:
             break
         for inner_end in range(_interior_end_floor(start, end, inner_start), end):
             inner_window = inner_end - inner_start + 1

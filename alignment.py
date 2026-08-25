@@ -45,7 +45,11 @@ class Layer(IntEnum):
     """The score came from a run of gaps in the first sequence."""
 
 
-# By default, we use BLOSUM62 with affine gap penalties
+default_proteins_scale: int = 5
+"""What the published BLOSUM62 is multiplied by, so a half-point gap extension lands on an integer."""
+
+# BLOSUM62 as published, which is 24 by 24: its last row and column are the `*` stop codon, and the
+# 23-letter alphabet never indexes them. Trimmed so the table and the alphabet agree on their width.
 # fmt: off
 default_proteins_matrix = (
     np.array(
@@ -76,10 +80,13 @@ default_proteins_matrix = (
             -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4,  1,
         ],
         dtype=np.int8,
-    ).reshape(24, 24)
-    * 5
+    ).reshape(24, 24)[: len(default_proteins_alphabet), : len(default_proteins_alphabet)]
+    * default_proteins_scale
 )
 # fmt: on
+
+default_proteins_costs = TabulatedSubstitutionCosts(default_proteins_alphabet, default_proteins_matrix)
+"""The shipped table paired with the alphabet that indexes it, which is what a caller starts from."""
 
 
 def _reconstruct_alignment(
@@ -103,32 +110,32 @@ def _reconstruct_alignment(
     """
 
     first_gapped, second_gapped = "", ""
-    i, j = len(encoded_first), len(encoded_second)
+    row, column = len(encoded_first), len(encoded_second)
     state = Layer.ALIGNING
 
     # Backtrack to recover the alignment
-    while should_continue(i, j):
+    while should_continue(row, column):
         if state is Layer.DELETING:
-            first_gapped += code_to_char(encoded_first[i - 1])
+            first_gapped += code_to_char(encoded_first[row - 1])
             second_gapped += "-"
-            extends = deletes[i - 1, j] + extend > scores[i - 1, j] + opening
-            i -= 1
+            extends = deletes[row - 1, column] + extend > scores[row - 1, column] + opening
+            row -= 1
             state = Layer.DELETING if extends else Layer.ALIGNING
         elif state is Layer.INSERTING:
             first_gapped += "-"
-            second_gapped += code_to_char(encoded_second[j - 1])
-            extends = inserts[i, j - 1] + extend > scores[i, j - 1] + opening
-            j -= 1
+            second_gapped += code_to_char(encoded_second[column - 1])
+            extends = inserts[row, column - 1] + extend > scores[row, column - 1] + opening
+            column -= 1
             state = Layer.INSERTING if extends else Layer.ALIGNING
-        elif changes[i, j] == Layer.DELETING:
+        elif changes[row, column] == Layer.DELETING:
             state = Layer.DELETING
-        elif changes[i, j] == Layer.INSERTING:
+        elif changes[row, column] == Layer.INSERTING:
             state = Layer.INSERTING
         else:  # An aligning step, whether the two symbols matched or not
-            first_gapped += code_to_char(encoded_first[i - 1])
-            second_gapped += code_to_char(encoded_second[j - 1])
-            i -= 1
-            j -= 1
+            first_gapped += code_to_char(encoded_first[row - 1])
+            second_gapped += code_to_char(encoded_second[column - 1])
+            row -= 1
+            column -= 1
 
     # A global path must reach the origin, so whatever is left is genuinely aligned against gaps.
     # A local path stops wherever the score falls to zero, and everything before that is outside
@@ -137,23 +144,22 @@ def _reconstruct_alignment(
         return first_gapped[::-1], second_gapped[::-1]
 
     # Add remaining characters from `encoded_first` (with gaps in `encoded_second`)
-    while i > 0:
-        first_gapped += code_to_char(encoded_first[i - 1])
+    while row > 0:
+        first_gapped += code_to_char(encoded_first[row - 1])
         second_gapped += "-"
-        i -= 1
+        row -= 1
 
     # Add remaining characters from `encoded_second` (with gaps in `encoded_first`)
-    while j > 0:
+    while column > 0:
         first_gapped += "-"
-        second_gapped += code_to_char(encoded_second[j - 1])
-        j -= 1
+        second_gapped += code_to_char(encoded_second[column - 1])
+        column -= 1
 
     return first_gapped[::-1], second_gapped[::-1]
 
 
 def _validate_gotoh_arguments(
-    substitution: SubstitutionCosts | None = None,
-    gaps: AffineGapCosts | None = None,
+    substitution: SubstitutionCosts | None = None, gaps: AffineGapCosts | None = None
 ) -> tuple[str, np.ndarray, int, int]:
     """Resolves the two cost records into the alphabet, table and penalties a kernel wants.
 
@@ -196,32 +202,32 @@ def _levenshtein_alignment_recurrence(
 
     # Initialize the scoring matrix
     scores[0, 0] = 0
-    for i in range(1, first_length + 1):
-        scores[i, 0] = i
-        changes[i, 0] = Layer.DELETING
-    for j in range(1, second_length + 1):
-        scores[0, j] = j
-        changes[0, j] = Layer.INSERTING
+    for row in range(1, first_length + 1):
+        scores[row, 0] = row
+        changes[row, 0] = Layer.DELETING
+    for column in range(1, second_length + 1):
+        scores[0, column] = column
+        changes[0, column] = Layer.INSERTING
 
     # Fill the scoring matrix and track operations
-    for i in range(1, first_length + 1):
-        for j in range(1, second_length + 1):
+    for row in range(1, first_length + 1):
+        for column in range(1, second_length + 1):
 
-            substitution = int(encoded_first[i - 1] != encoded_second[j - 1])
+            substitution = int(encoded_first[row - 1] != encoded_second[column - 1])
 
-            delete = scores[i - 1, j] + 1
-            insert = scores[i, j - 1] + 1
-            replace = scores[i - 1, j - 1] + substitution
+            delete = scores[row - 1, column] + 1
+            insert = scores[row, column - 1] + 1
+            replace = scores[row - 1, column - 1] + substitution
             score = min(replace, delete, insert)
-            scores[i, j] = score
+            scores[row, column] = score
 
             # Determine the minimum cost operation
             if score == replace:
-                changes[i, j] = Layer.ALIGNING
+                changes[row, column] = Layer.ALIGNING
             elif score == delete:
-                changes[i, j] = Layer.DELETING
+                changes[row, column] = Layer.DELETING
             else:
-                changes[i, j] = Layer.INSERTING
+                changes[row, column] = Layer.INSERTING
 
     return scores, changes
 
@@ -233,22 +239,27 @@ def levenshtein_alignment(first: str, second: str) -> tuple[str, str, int]:
     including insertions, deletions, and substitutions, required to change one
     sequence into the other.
     """
-    encoded_first = np.array([ord(c) for c in first], dtype=np.uint32)
-    encoded_second = np.array([ord(c) for c in second], dtype=np.uint32)
+    encoded_first = np.array([ord(letter) for letter in first], dtype=np.uint32)
+    encoded_second = np.array([ord(letter) for letter in second], dtype=np.uint32)
     scores, changes = _levenshtein_alignment_recurrence(encoded_first, encoded_second)
     first_gapped, second_gapped = _reconstruct_alignment(
-        changes, scores, scores, scores, encoded_first, encoded_second, 1, 1, chr, lambda i, j: i > 0 and j > 0
+        changes,
+        scores,
+        scores,
+        scores,
+        encoded_first,
+        encoded_second,
+        1,
+        1,
+        chr,
+        lambda row, column: row > 0 and column > 0,
     )
     return first_gapped, second_gapped, int(scores[-1, -1])
 
 
 @jit_if_available(nopython=True)
 def _needleman_wunsch_gotoh_recurrence(
-    encoded_first: np.ndarray,
-    encoded_second: np.ndarray,
-    substitution_matrix: np.ndarray,
-    opening: int,
-    extend: int,
+    encoded_first: np.ndarray, encoded_second: np.ndarray, substitution_matrix: np.ndarray, opening: int, extend: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Aligns two sequences using Gotoh's affine gap penalty extensions for the
@@ -292,51 +303,41 @@ def _needleman_wunsch_gotoh_recurrence(
     # so that the values in header (left or top) "gaps" are always smaller than those
     # in the "scores", and they are not considered as starting points in each iteration.
     scores[0, 0] = 0
-    for j in range(1, second_length + 1):
-        scores[0, j] = opening + (j - 1) * extend
-        deletes[0, j] = scores[0, j] + opening + extend
-        changes[0, j] = Layer.INSERTING
+    for column in range(1, second_length + 1):
+        scores[0, column] = opening + (column - 1) * extend
+        deletes[0, column] = scores[0, column] + opening + extend
+        changes[0, column] = Layer.INSERTING
 
     # Fill the scoring matrix
-    for i in range(1, first_length + 1):
-        scores[i, 0] = opening + (i - 1) * extend
-        inserts[i, 0] = scores[i, 0] + opening + extend
-        changes[i, 0] = Layer.DELETING
+    for row in range(1, first_length + 1):
+        scores[row, 0] = opening + (row - 1) * extend
+        inserts[row, 0] = scores[row, 0] + opening + extend
+        changes[row, 0] = Layer.DELETING
 
-        for j in range(1, second_length + 1):
-            substitution = substitution_matrix[encoded_first[i - 1], encoded_second[j - 1]]
-            delete = max(
-                scores[i - 1, j] + opening,
-                deletes[i - 1, j] + extend,
-            )
-            insert = max(
-                scores[i, j - 1] + opening,
-                inserts[i, j - 1] + extend,
-            )
-            replace = scores[i - 1, j - 1] + substitution
+        for column in range(1, second_length + 1):
+            substitution = substitution_matrix[encoded_first[row - 1], encoded_second[column - 1]]
+            delete = max(scores[row - 1, column] + opening, deletes[row - 1, column] + extend)
+            insert = max(scores[row, column - 1] + opening, inserts[row, column - 1] + extend)
+            replace = scores[row - 1, column - 1] + substitution
             score = max(replace, delete, insert)
-            scores[i, j] = score
-            deletes[i, j] = delete
-            inserts[i, j] = insert
+            scores[row, column] = score
+            deletes[row, column] = delete
+            inserts[row, column] = insert
 
             # Track changes
             if score == replace:
-                changes[i, j] = Layer.ALIGNING
+                changes[row, column] = Layer.ALIGNING
             elif score == delete:
-                changes[i, j] = Layer.DELETING
+                changes[row, column] = Layer.DELETING
             else:
-                changes[i, j] = Layer.INSERTING
+                changes[row, column] = Layer.INSERTING
 
     return scores, changes, deletes, inserts
 
 
 @jit_if_available(nopython=True)
 def _needleman_wunsch_gotoh_score_recurrence(
-    encoded_first: np.ndarray,
-    encoded_second: np.ndarray,
-    substitution_matrix: np.ndarray,
-    opening: int,
-    extend: int,
+    encoded_first: np.ndarray, encoded_second: np.ndarray, substitution_matrix: np.ndarray, opening: int, extend: int
 ) -> int:
     """
     Measures the alignment score of two sequences using Gotoh's affine gap penalty extensions for the
@@ -364,23 +365,23 @@ def _needleman_wunsch_gotoh_score_recurrence(
     # so that the values in header (left or top) "gaps" are always smaller than those
     # in the "scores", and they are not considered as starting points in each iteration.
     old_scores[0] = 0
-    for j in range(1, second_length + 1):
-        old_scores[j] = opening + (j - 1) * extend
-        old_deletes[j] = old_scores[j] + opening + extend
+    for column in range(1, second_length + 1):
+        old_scores[column] = opening + (column - 1) * extend
+        old_deletes[column] = old_scores[column] + opening + extend
 
-    for i in range(1, first_length + 1):
-        new_scores[0] = opening + (i - 1) * extend
+    for row in range(1, first_length + 1):
+        new_scores[0] = opening + (row - 1) * extend
         new_inserts[0] = new_scores[0] + opening + extend
 
-        for j in range(1, second_length + 1):
-            substitution = substitution_matrix[encoded_first[i - 1], encoded_second[j - 1]]
-            delete = max(old_scores[j] + opening, old_deletes[j] + extend)
-            insert = max(new_scores[j - 1] + opening, new_inserts[j - 1] + extend)
-            replace = old_scores[j - 1] + substitution
+        for column in range(1, second_length + 1):
+            substitution = substitution_matrix[encoded_first[row - 1], encoded_second[column - 1]]
+            delete = max(old_scores[column] + opening, old_deletes[column] + extend)
+            insert = max(new_scores[column - 1] + opening, new_inserts[column - 1] + extend)
+            replace = old_scores[column - 1] + substitution
             score = max(replace, delete, insert)
-            new_scores[j] = score
-            new_deletes[j] = delete
-            new_inserts[j] = insert
+            new_scores[column] = score
+            new_deletes[column] = delete
+            new_inserts[column] = insert
 
         # Swap rows
         old_scores, new_scores = new_scores, old_scores
@@ -392,11 +393,7 @@ def _needleman_wunsch_gotoh_score_recurrence(
 
 @jit_if_available(nopython=True)
 def _smith_waterman_gotoh_recurrence(
-    encoded_first: np.ndarray,
-    encoded_second: np.ndarray,
-    substitution_matrix: np.ndarray,
-    opening: int,
-    extend: int,
+    encoded_first: np.ndarray, encoded_second: np.ndarray, substitution_matrix: np.ndarray, opening: int, extend: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
     """
     Aligns two sequences using Gotoh's affine gap penalty extensions for the
@@ -445,50 +442,40 @@ def _smith_waterman_gotoh_recurrence(
     best_place = (0, 0)
 
     # Fill the scoring matrix
-    for i in range(1, first_length + 1):
-        scores[i, 0] = 0
-        inserts[i, 0] = opening + extend
-        changes[i, 0] = Layer.DELETING
+    for row in range(1, first_length + 1):
+        scores[row, 0] = 0
+        inserts[row, 0] = opening + extend
+        changes[row, 0] = Layer.DELETING
 
-        for j in range(1, second_length + 1):
-            substitution = substitution_matrix[encoded_first[i - 1], encoded_second[j - 1]]
-            delete = max(
-                scores[i - 1, j] + opening,
-                deletes[i - 1, j] + extend,
-            )
-            insert = max(
-                scores[i, j - 1] + opening,
-                inserts[i, j - 1] + extend,
-            )
-            replace = scores[i - 1, j - 1] + substitution
+        for column in range(1, second_length + 1):
+            substitution = substitution_matrix[encoded_first[row - 1], encoded_second[column - 1]]
+            delete = max(scores[row - 1, column] + opening, deletes[row - 1, column] + extend)
+            insert = max(scores[row, column - 1] + opening, inserts[row, column - 1] + extend)
+            replace = scores[row - 1, column - 1] + substitution
             score = max(replace, delete, insert, 0)
-            scores[i, j] = score
-            deletes[i, j] = delete
-            inserts[i, j] = insert
+            scores[row, column] = score
+            deletes[row, column] = delete
+            inserts[row, column] = insert
 
             # Track changes
             if score == replace:
-                changes[i, j] = Layer.ALIGNING
+                changes[row, column] = Layer.ALIGNING
             elif score == delete:
-                changes[i, j] = Layer.DELETING
+                changes[row, column] = Layer.DELETING
             else:
-                changes[i, j] = Layer.INSERTING
+                changes[row, column] = Layer.INSERTING
 
             # Update max score and position
             if score > max_score:
                 max_score = score
-                best_place = (i, j)
+                best_place = (row, column)
 
     return scores, changes, deletes, inserts, best_place
 
 
 @jit_if_available(nopython=True)
 def _smith_waterman_gotoh_score_recurrence(
-    encoded_first: np.ndarray,
-    encoded_second: np.ndarray,
-    substitution_matrix: np.ndarray,
-    opening: int,
-    extend: int,
+    encoded_first: np.ndarray, encoded_second: np.ndarray, substitution_matrix: np.ndarray, opening: int, extend: int
 ) -> int:
     """
     Computes the Smith-Waterman alignment score using Gotoh's affine gap penalty extensions.
@@ -509,25 +496,25 @@ def _smith_waterman_gotoh_score_recurrence(
     # so that the values in header (left or top) "gaps" are always smaller than those
     # in the "scores", and they are not considered as starting points in each iteration.
     old_scores[0] = 0
-    for j in range(1, second_length + 1):
-        old_scores[j] = 0
-        old_deletes[j] = opening + extend
+    for column in range(1, second_length + 1):
+        old_scores[column] = 0
+        old_deletes[column] = opening + extend
 
     max_score = 0
 
-    for i in range(1, first_length + 1):
+    for row in range(1, first_length + 1):
         new_scores[0] = 0
         new_inserts[0] = opening + extend
 
-        for j in range(1, second_length + 1):
-            substitution = substitution_matrix[encoded_first[i - 1], encoded_second[j - 1]]
-            delete = max(old_scores[j] + opening, old_deletes[j] + extend)
-            insert = max(new_scores[j - 1] + opening, new_inserts[j - 1] + extend)
-            replace = old_scores[j - 1] + substitution
+        for column in range(1, second_length + 1):
+            substitution = substitution_matrix[encoded_first[row - 1], encoded_second[column - 1]]
+            delete = max(old_scores[column] + opening, old_deletes[column] + extend)
+            insert = max(new_scores[column - 1] + opening, new_inserts[column - 1] + extend)
+            replace = old_scores[column - 1] + substitution
             score = max(replace, delete, insert, 0)
-            new_scores[j] = score
-            new_deletes[j] = delete
-            new_inserts[j] = insert
+            new_scores[column] = score
+            new_deletes[column] = delete
+            new_inserts[column] = insert
 
             if score > max_score:
                 max_score = score
