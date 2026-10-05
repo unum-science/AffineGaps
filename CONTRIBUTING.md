@@ -27,7 +27,7 @@ pixi run hooks    # git config core.hooksPath .githooks
 pixi run format   # mojo format -l 120 *.mojo
 ```
 
-`pre-commit` gates `mojo format`, `black` and `ruff` on the staged tree, and a set of prose rules — big-O notation, comment rulers, backticked identifiers in prose, footnote spacing in tables.
+`pre-commit` gates `mojo format`, `ruff format`, `taplo format` and `ruff check` on the staged tree, and a set of prose rules — big-O notation, comment rulers, backticked identifiers in prose, footnote spacing in tables. `pixi run format` applies the same three formatters.
 The hook is the list, so it grows without this file having to.
 `commit-msg` holds the subject to `Fix:`, `Add:`, `Improve:`, `Chore:`, `Make:`, `Docs:` or `Break:`.
 The Mojo gate fails closed when the formatter cannot be resolved, because outside the pixi environment `mojo format` warns, changes nothing and still exits zero.

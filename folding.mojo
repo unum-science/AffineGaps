@@ -20,13 +20,12 @@ stacking, tetraloop bonuses or the special small-internal-loop tables would appl
 The recurrence, the tie-breaking and the traceback are transcribed from `folding.py`, the oracle.
 """
 
-from std.gpu import block_idx, thread_idx
-from std.gpu.primitives.warp import WARP_SIZE, min as warp_min
+from std.math import log
 from std.memory import stack_allocation
 from std.memory.pointer import AddressSpace
 
-from max.gpu import barrier
-from std.math import log
+from max.gpu import barrier, block_idx, thread_idx
+from max.gpu.primitives.warp import WARP_SIZE, min as warp_min
 
 
 from errors import AffineGapsError, ErrorKind
@@ -34,6 +33,9 @@ from common import (
     CLOSE_BYTE,
     DEFAULT_RNA_ALPHABET,
     DeviceScope,
+    MIN_CLOSING_REACH,
+    MIN_TURN,
+    PartnerRange,
     OPEN_BYTE,
     PositionDType,
     RNA_ALPHABET_SIZE,
@@ -76,10 +78,6 @@ from turner import (
 
 # region Energy Model
 
-comptime MIN_TURN = 3
-"""Fewest bases any pair must enclose, which is what the backbone can turn in."""
-comptime MIN_CLOSING_REACH = MIN_TURN + 1
-"""The turn plus the partner past it: the shortest head-to-partner distance."""
 comptime MIN_PAIRED_WINDOW = MIN_CLOSING_REACH + 1
 """The reach plus the head: the shortest window `paired` can be finite on."""
 comptime RNA_MISMATCH_PAIRS = RNA_ALPHABET_SIZE * RNA_ALPHABET_SIZE
@@ -404,16 +402,6 @@ struct PartnerRuns(Copyable, Movable):
     """Every position that can close a pair, the letters' runs laid end to end."""
     var bounds: List[Scalar[PositionDType]]
     """Letter `c`'s run at its first entry from `t` onwards, held at `c * (sequence_length + 1) + t`."""
-
-
-@fieldwise_init
-struct PartnerRange(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Half-open slice of one letter's run, covering the partners one window can reach."""
-
-    var low: Int
-    """First entry of the run that lands inside the window."""
-    var high: Int
-    """One past the run's last entry inside the window."""
 
 
 def partner_runs(

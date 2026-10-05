@@ -60,7 +60,7 @@ jobs:
                   python -m pip install --upgrade pip
                   pip install --group lint
             - name: Format
-              run: black --check --diff affinegaps.py test.py
+              run: ruff format --check affinegaps.py test.py alignment.py cofolding.py common.py folding.py turner.py bench.py
             - name: Lint
               run: ruff check affinegaps.py test.py
             - name: Types

@@ -53,7 +53,6 @@ from cofolding import (
     serial_cofold,
 )
 from alignment import (
-    ALL_MODES,
     AffineGapCosts,
     AlignmentMode,
     DEFAULT_GAP_EXTENSION,
@@ -637,10 +636,10 @@ def gotoh_scores(
 
     if device == Device.CPU:
         for index in range(pairs):
-            comptime for choice in range(len(ALL_MODES)):
-                comptime candidate = ALL_MODES[choice]
-                if requested_mode == candidate:
-                    results[index] = gotoh_score[candidate](firsts[index], seconds[index], substitution, gaps)
+            if requested_mode == AlignmentMode.LOCAL:
+                results[index] = gotoh_score[AlignmentMode.LOCAL](firsts[index], seconds[index], substitution, gaps)
+            else:
+                results[index] = gotoh_score[AlignmentMode.GLOBAL](firsts[index], seconds[index], substitution, gaps)
         return results
 
     var placement = placement_from(requested)
@@ -662,21 +661,25 @@ def gotoh_scores(
         for slot in range(len(banded)):
             batch_firsts.append(firsts[banded[slot]])
             batch_seconds.append(seconds[banded[slot]])
-        comptime for index in range(len(ALL_MODES)):
-            comptime candidate = ALL_MODES[index]
-            if requested_mode == candidate:
-                var scored = gotoh_scores_batch[candidate](batch_firsts, batch_seconds, substitution, gaps, scope)
-                for slot in range(len(banded)):
-                    results[banded[slot]] = scored[slot]
+        if requested_mode == AlignmentMode.LOCAL:
+            var scored = gotoh_scores_batch[AlignmentMode.LOCAL](batch_firsts, batch_seconds, substitution, gaps, scope)
+            for slot in range(len(banded)):
+                results[banded[slot]] = scored[slot]
+        else:
+            var scored = gotoh_scores_batch[AlignmentMode.GLOBAL](batch_firsts, batch_seconds, substitution, gaps, scope)
+            for slot in range(len(banded)):
+                results[banded[slot]] = scored[slot]
 
     for slot in range(len(tiled)):
         var index = tiled[slot]
-        comptime for choice in range(len(ALL_MODES)):
-            comptime candidate = ALL_MODES[choice]
-            if requested_mode == candidate:
-                results[index] = gotoh_score_linear_gpu[candidate](
-                    firsts[index], seconds[index], substitution, gaps, scope
-                )
+        if requested_mode == AlignmentMode.LOCAL:
+            results[index] = gotoh_score_linear_gpu[AlignmentMode.LOCAL](
+                firsts[index], seconds[index], substitution, gaps, scope
+            )
+        else:
+            results[index] = gotoh_score_linear_gpu[AlignmentMode.GLOBAL](
+                firsts[index], seconds[index], substitution, gaps, scope
+            )
     return results
 
 
@@ -694,11 +697,9 @@ def align_pair_host(
             return smith_waterman_gotoh_alignment_linear(first, second, substitution, gaps)
         return needleman_wunsch_gotoh_alignment_linear(first, second, substitution, gaps)
 
-    comptime for index in range(len(ALL_MODES)):
-        comptime candidate = ALL_MODES[index]
-        if mode == candidate:
-            return gotoh_alignment[candidate](first, second, substitution, gaps)
-    raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, "alignment mode")
+    if mode == AlignmentMode.LOCAL:
+        return gotoh_alignment[AlignmentMode.LOCAL](first, second, substitution, gaps)
+    return gotoh_alignment[AlignmentMode.GLOBAL](first, second, substitution, gaps)
 
 
 def align_pair_device(
@@ -729,11 +730,9 @@ def align_pair_device(
     var rights = Python().list()
     lefts.append(first)
     rights.append(second)
-    comptime for index in range(len(ALL_MODES)):
-        comptime candidate = ALL_MODES[index]
-        if mode == candidate:
-            return gotoh_alignments_batch[candidate](lefts, rights, substitution, gaps, scope)[0]
-    raise AffineGapsError(ErrorKind.INVALID_ARGUMENT, "alignment mode")
+    if mode == AlignmentMode.LOCAL:
+        return gotoh_alignments_batch[AlignmentMode.LOCAL](lefts, rights, substitution, gaps, scope)[0]
+    return gotoh_alignments_batch[AlignmentMode.GLOBAL](lefts, rights, substitution, gaps, scope)[0]
 
 
 def gotoh_alignments(
@@ -787,15 +786,20 @@ def gotoh_alignments(
             for slot in range(len(batchable)):
                 batch_firsts.append(firsts[batchable[slot]])
                 batch_seconds.append(seconds[batchable[slot]])
-            comptime for index in range(len(ALL_MODES)):
-                comptime candidate = ALL_MODES[index]
-                if requested_mode == candidate:
-                    var aligned = gotoh_alignments_batch[candidate](
-                        batch_firsts, batch_seconds, substitution, gaps, scope
-                    )
-                    for slot in range(len(batchable)):
-                        results[batchable[slot]] = aligned[slot]
-                        placed[batchable[slot]] = True
+            if requested_mode == AlignmentMode.LOCAL:
+                var aligned = gotoh_alignments_batch[AlignmentMode.LOCAL](
+                    batch_firsts, batch_seconds, substitution, gaps, scope
+                )
+                for slot in range(len(batchable)):
+                    results[batchable[slot]] = aligned[slot]
+                    placed[batchable[slot]] = True
+            else:
+                var aligned = gotoh_alignments_batch[AlignmentMode.GLOBAL](
+                    batch_firsts, batch_seconds, substitution, gaps, scope
+                )
+                for slot in range(len(batchable)):
+                    results[batchable[slot]] = aligned[slot]
+                    placed[batchable[slot]] = True
 
         for index in range(pairs):
             if not placed[index]:

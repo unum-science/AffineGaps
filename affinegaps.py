@@ -52,7 +52,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import cache, lru_cache
-from typing import Any
+from typing import Any, NamedTuple
 
 from alignment import (
     Mode,
@@ -63,10 +63,10 @@ from alignment import (
     _smith_waterman_gotoh_score_recurrence,
     _validate_gotoh_arguments,
     colorize_alignment,
+    levenshtein_alignment,
     default_proteins_costs,
     default_proteins_matrix,
     default_proteins_scale,
-    levenshtein_alignment,
 )
 
 from cofolding import default_rna_pair_matrix
@@ -101,6 +101,9 @@ __all__ = [
     "TabulatedSubstitutionCosts",
     "UniformSubstitutionCosts",
     "available",
+    "Alignment",
+    "Cofold",
+    "Fold",
     "colorize_alignment",
     "default_proteins_alphabet",
     "default_proteins_costs",
@@ -115,11 +118,13 @@ __all__ = [
     "needleman_wunsch_gotoh_score",
     "needleman_wunsch_gotoh_scores",
     "sankoff_cofold",
+    "sankoff_cofolds",
     "smith_waterman_gotoh_alignment",
     "smith_waterman_gotoh_alignments",
     "smith_waterman_gotoh_score",
     "smith_waterman_gotoh_scores",
     "zuker_fold",
+    "zuker_folds",
 ]
 
 
@@ -594,7 +599,7 @@ def sankoff_cofold(
     if backend is Backend.MOJO:
         if not _fits_compiled_scores(match, mismatch):
             raise NotImplementedError(
-                f"cofold on the {backend} backend scores in int8, so match and mismatch must lie in "
+                f"sankoff_cofold on the {backend} backend scores in int8, so match and mismatch must lie in "
                 f"[{COMPILED_SCORE_RANGE[0]}, {COMPILED_SCORE_RANGE[1]}]"
             )
         compiled = _compiled_module()
@@ -629,6 +634,40 @@ _ALGORITHMS: dict[Algorithm, _Spec] = {
     Algorithm.GLOBAL_ALIGNMENT: _Spec(needleman_wunsch_gotoh_alignment, Result.ALIGNMENT, Mode.GLOBAL),
     Algorithm.LOCAL_ALIGNMENT: _Spec(smith_waterman_gotoh_alignment, Result.ALIGNMENT, Mode.LOCAL),
 }
+
+
+class Alignment(NamedTuple):
+    """One Gotoh path: the two gapped rows and the score they realize."""
+
+    first: str
+    second: str
+    score: int
+
+
+class Fold(NamedTuple):
+    """One Zuker fold: dot-bracket structure and free energy in kcal/mol."""
+
+    structure: str
+    energy: float
+
+
+class Cofold(NamedTuple):
+    """One Sankoff result: both gapped rows, the shared structure, and the score."""
+
+    first: str
+    second: str
+    structure: str
+    score: int
+
+
+def zuker_folds(sequences, **options) -> list[Fold]:
+    """Folds each sequence on its own. Tables are not batched; a batch would multiply the footprint."""
+    return [Fold(*zuker_fold(sequence, **options)) for sequence in sequences]
+
+
+def sankoff_cofolds(firsts, seconds, **options) -> list[Cofold]:
+    """Cofolds each pair on its own, for the same reason `zuker_folds` does not share a table."""
+    return [Cofold(*sankoff_cofold(first, second, **options)) for first, second in zip(firsts, seconds, strict=True)]
 
 # endregion Dispatch Table
 
@@ -739,7 +778,7 @@ def _run_align(options) -> dict:
         extend=defaults.extend if options.extend is None else options.extend,
     )
     aligner = smith_waterman_gotoh_alignment if options.mode is Mode.LOCAL else needleman_wunsch_gotoh_alignment
-    first_gapped, second_gapped, score = aligner(
+    path = aligner(
         options.first,
         options.second,
         substitution=substitution,
@@ -748,6 +787,7 @@ def _run_align(options) -> dict:
         device=options.device,
         placement=Placement(device=options.device, gpu_id=options.gpu_id, threads=options.threads),
     )
+    first_gapped, second_gapped, score = path
     return {
         "operation": Verb.ALIGN,
         "mode": options.mode,

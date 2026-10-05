@@ -544,8 +544,8 @@ def test_alignment_output_is_well_formed(backend, mode: str, scoring: dict):
 def test_alignment_symmetry(backend):
     """Swapping the arguments must not change the score."""
     first, second = random_pair()
-    assert needleman_wunsch_gotoh_score(first, second, **SCORING, **backend) == (
-        needleman_wunsch_gotoh_score(second, first, **SCORING, **backend)
+    assert needleman_wunsch_gotoh_score(first, second, **SCORING, **backend) == needleman_wunsch_gotoh_score(
+        second, first, **SCORING, **backend
     )
 
 
@@ -1726,7 +1726,11 @@ def test_scoring_flags_reach_the_recurrence(run_cli):
     named = ["--match", "2", "--mismatch", "-1"]
     _, printed, _ = run_cli(["align", "GIVEQ", "HSQGT", *named, "--format", "json"])
     assert json.loads(printed)["score"] == needleman_wunsch_gotoh_score(
-        "GIVEQ", "HSQGT", substitution=UniformSubstitutionCosts(2, -1), gaps=AffineGapCosts(), backend="python"
+        "GIVEQ",
+        "HSQGT",
+        substitution=UniformSubstitutionCosts(2, -1),
+        gaps=AffineGapCosts(),
+        backend="python",
     )
 
 

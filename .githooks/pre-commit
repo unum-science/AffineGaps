@@ -191,19 +191,31 @@ check_mojo_format() {
         "            Run: pixi run mojo format -l 120 *.mojo"
 }
 
-# Python matches what `pixi run lint` enforces, so the hook and CI cannot disagree.
+# Python and TOML match `pixi run format`, so the hook and the formatter cannot disagree.
 check_python_format() {
     [ ${#python_staged[@]} -gt 0 ] || return 0
     command -v uvx > /dev/null 2>&1 || return 0
     local hits
-    hits=$(uvx black --line-length 120 --skip-magic-trailing-comma --check "${python_staged[@]}" 2>&1 | grep '^would reformat' || true)
+    hits=$(uvx ruff format --check "${python_staged[@]}" 2>&1 | grep -E 'Would reformat|would reformat' || true)
     [ -z "$hits" ] || fail "$hits"$'\n' \
-        "staged Python is not black-clean." \
-        "            Run: uvx black --line-length 120 --skip-magic-trailing-comma *.py"
+        "staged Python is not ruff-format clean." \
+        "            Run: pixi run format"
     hits=$(uvx ruff check "${python_staged[@]}" 2>&1 | grep -E '^[^ ].*:[0-9]+:[0-9]+:' || true)
     [ -z "$hits" ] || fail "$hits"$'\n' \
         "staged Python does not pass ruff." \
         "            Run: uvx ruff check --fix *.py"
+}
+
+check_toml_format() {
+    local toml=0
+    for path in "${staged[@]}"; do
+        case "$path" in *.toml) toml=1 ;; esac
+    done
+    [ "$toml" -eq 1 ] || return 0
+    command -v pixi > /dev/null 2>&1 || return 0
+    pixi run -q taplo format --check > /dev/null 2>&1 || fail "" \
+        "staged TOML is not taplo-clean." \
+        "            Run: pixi run format"
 }
 
 # endregion Toolchain Gates
@@ -216,6 +228,7 @@ check_split_index
 check_prose_identifiers
 check_mojo_format
 check_python_format
+check_toml_format
 
 [ $failed -eq 0 ] || echo "pre-commit: rejected. Fix the above, or bypass with --no-verify." >&2
 exit $failed

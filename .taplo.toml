@@ -1,0 +1,10 @@
+include = [".taplo.toml", "pixi.toml", "pyproject.toml"]
+
+[formatting]
+align_comments = true
+align_entries = false
+reorder_keys = false
+array_auto_expand = false
+array_auto_collapse = false
+column_width = 120
+indent_string = "  "

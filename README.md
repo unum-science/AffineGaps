@@ -49,7 +49,8 @@ During my exploration of existing implementations, I've noticed several bugs:
 
 ## Benchmarks
 
-Throughput first, against the same kernels on one CPU core, with third-party tools where one implements the same recurrence.
+Throughput first, against the same kernels on one Sapphire Rapids core, with third-party tools where one implements the same recurrence.
+The count in a row name is streaming multiprocessors on a GPU and cores on a CPU.
 Every cell is __wall time · cell-update rate__, where the count depends only on the sequence lengths, so every row in a column is rated against the same work.
 
 A dash is a run abandoned as too slow or too large to be worth the machine time.
@@ -63,13 +64,13 @@ Best of three; third-party rows are command-line invocations, so their sub-100 m
   <img alt="Alignment wall clock against pair length" src="assets/alignment-light.svg">
 </picture>
 
-| Variant           |               64 aa |              256 aa |              1 Kaa |               4 Kaa |               16 Kaa |               64 Kaa |            256 Kaa |              1 Maa |
-| :---------------- | ------------------: | ------------------: | -----------------: | ------------------: | -------------------: | -------------------: | -----------------: | -----------------: |
-| AffineGaps, H100  |   173 µs · 24 MCUPS |  287 µs · 229 MCUPS | 1.3 ms · 790 MCUPS | 4.7 ms · 3.58 GCUPS | 20.5 ms · 13.1 GCUPS | 59.0 ms · 72.8 GCUPS | 307 ms · 224 GCUPS | 2.36 s · 467 GCUPS |
-| AffineGaps, 1xSPR |    48 µs · 86 MCUPS |   660 µs · 99 MCUPS | 10.6 ms · 99 MCUPS |   179 ms · 94 MCUPS |    2.85 s · 94 MCUPS |    47.3 s · 91 MCUPS |                  — |                  — |
-| Parasail, 1xSPR   |   24 µs · 171 MCUPS |  155 µs · 423 MCUPS | 1.4 ms · 728 MCUPS | 29.4 ms · 571 MCUPS |   394 ms · 682 MCUPS | 7.22 s · 595 MCUPS ¹ |                  — |                  — |
-| BioPython, 1xSPR  |   172 µs · 24 MCUPS |  1.38 ms · 47 MCUPS | 19.5 ms · 54 MCUPS |   308 ms · 54 MCUPS |    4.88 s · 55 MCUPS |  78.1 s · 55 MCUPS ¹ |                  — |                  — |
-| EMBOSS, 1xSPR     | 110 ms · 37 KCUPS ² | 70.0 ms · 936 KCUPS | 90.0 ms · 12 MCUPS |   680 ms · 25 MCUPS |  21.0 s · 13 MCUPS ¹ |                    — |                  — |                  — |
+| Variant                        | Kind |               64 aa |              256 aa |              1 Kaa |               4 Kaa |               16 Kaa |               64 Kaa |            256 Kaa |              1 Maa |
+| :----------------------------- | :--: | ------------------: | ------------------: | -----------------: | ------------------: | -------------------: | -------------------: | -----------------: | -----------------: |
+| AffineGaps, 132× Nvidia SM90   | GPU  |   173 µs · 24 MCUPS |  287 µs · 229 MCUPS | 1.3 ms · 790 MCUPS | 4.7 ms · 3.58 GCUPS | 20.5 ms · 13.1 GCUPS | 59.0 ms · 72.8 GCUPS | 307 ms · 224 GCUPS | 2.36 s · 467 GCUPS |
+| AffineGaps, 1× Intel SPR       | CPU  |    48 µs · 86 MCUPS |   660 µs · 99 MCUPS | 10.6 ms · 99 MCUPS |   179 ms · 94 MCUPS |    2.85 s · 94 MCUPS |    47.3 s · 91 MCUPS |                  — |                  — |
+| Parasail, 1× Intel SPR         | CPU  |   24 µs · 171 MCUPS |  155 µs · 423 MCUPS | 1.4 ms · 728 MCUPS | 29.4 ms · 571 MCUPS |   394 ms · 682 MCUPS | 7.22 s · 595 MCUPS ¹ |                  — |                  — |
+| BioPython, 1× Intel SPR        | CPU  |   172 µs · 24 MCUPS |  1.38 ms · 47 MCUPS | 19.5 ms · 54 MCUPS |   308 ms · 54 MCUPS |    4.88 s · 55 MCUPS |  78.1 s · 55 MCUPS ¹ |                  — |                  — |
+| EMBOSS, 1× Intel SPR           | CPU  | 110 ms · 37 KCUPS ² | 70.0 ms · 936 KCUPS | 90.0 ms · 12 MCUPS |   680 ms · 25 MCUPS |  21.0 s · 13 MCUPS ¹ |                    — |                  — |                  — |
 
 > Measured 23 August 2026, random protein pairs, BLOSUM62 scaled fivefold.
 > Columns are pair lengths in amino-acid "aa" residues.
@@ -87,13 +88,13 @@ An XIST lncRNA runs about 19 Knt, a SARS-CoV-2 genome is 29,903 bases, and the l
   <img alt="Folding wall clock against sequence length" src="assets/folding-light.svg">
 </picture>
 
-| Variant             |               128 nt |               256 nt |              512 nt |                1 Knt |                2 Knt |               4 Knt |               8 Knt |                 16 Knt |               32 Knt |              64 Knt |
-| :------------------ | -------------------: | -------------------: | ------------------: | -------------------: | -------------------: | ------------------: | ------------------: | ---------------------: | -------------------: | ------------------: |
-| AffineGaps, H100    | 1.53 ms · 1.86 GCUPS | 3.21 ms · 4.76 GCUPS | 7.3 ms · 10.4 GCUPS | 18.3 ms · 20.7 GCUPS | 50.9 ms · 40.8 GCUPS | 198 ms · 63.5 GCUPS | 1.63 s · 52.2 GCUPS |    9.56 s · 64.6 GCUPS | 1.1 min · 68.1 GCUPS | 10 min · 58.9 GCUPS |
-| AffineGaps, 1xSPR   |  4.54 ms · 629 MCUPS |  30.3 ms · 505 MCUPS |  153 ms · 492 MCUPS |   905 ms · 420 MCUPS |   5.24 s · 396 MCUPS |  34.9 s · 361 MCUPS |                   — |                      — |                    — |                   — |
-| ViennaRNA, 1xSPR    |  11.1 ms · 258 MCUPS |    50 ms · 306 MCUPS |  206 ms · 368 MCUPS |   847 ms · 448 MCUPS |   3.82 s · 544 MCUPS |  17.1 s · 737 MCUPS | 1.6 min · 906 MCUPS | 9.7 min · 1.06 GCUPS ¹ |                  — ² |                   — |
-| RNAstructure, 1xSPR |   55.2 ms · 52 MCUPS |    170 ms · 90 MCUPS |   929 ms · 81 MCUPS |    6.22 s · 61 MCUPS |    45.1 s · 46 MCUPS |                   — |                   — |                      — |                    — |                   — |
-| SeqFold, 1xSPR      |   29.5 ms · 97 MCUPS |    292 ms · 52 MCUPS |   3.59 s · 21 MCUPS |     51.3 s · 7 MCUPS |     12 min · 3 MCUPS |                   — |                   — |                      — |                    — |                   — |
+| Variant                        | Kind |               128 nt |               256 nt |              512 nt |                1 Knt |                2 Knt |               4 Knt |               8 Knt |                 16 Knt |               32 Knt |              64 Knt |
+| :----------------------------- | :--: | -------------------: | -------------------: | ------------------: | -------------------: | -------------------: | ------------------: | ------------------: | ---------------------: | -------------------: | ------------------: |
+| AffineGaps, 132× Nvidia SM90   | GPU  | 1.53 ms · 1.86 GCUPS | 3.21 ms · 4.76 GCUPS | 7.3 ms · 10.4 GCUPS | 18.3 ms · 20.7 GCUPS | 50.9 ms · 40.8 GCUPS | 198 ms · 63.5 GCUPS | 1.63 s · 52.2 GCUPS |    9.56 s · 64.6 GCUPS | 1.1 min · 68.1 GCUPS | 10 min · 58.9 GCUPS |
+| AffineGaps, 1× Intel SPR       | CPU  |  4.54 ms · 629 MCUPS |  30.3 ms · 505 MCUPS |  153 ms · 492 MCUPS |   905 ms · 420 MCUPS |   5.24 s · 396 MCUPS |  34.9 s · 361 MCUPS |                   — |                      — |                    — |                   — |
+| ViennaRNA, 1× Intel SPR        | CPU  |  11.1 ms · 258 MCUPS |    50 ms · 306 MCUPS |  206 ms · 368 MCUPS |   847 ms · 448 MCUPS |   3.82 s · 544 MCUPS |  17.1 s · 737 MCUPS | 1.6 min · 906 MCUPS | 9.7 min · 1.06 GCUPS ¹ |                  — ² |                   — |
+| RNAstructure, 1× Intel SPR     | CPU  |   55.2 ms · 52 MCUPS |    170 ms · 90 MCUPS |   929 ms · 81 MCUPS |    6.22 s · 61 MCUPS |    45.1 s · 46 MCUPS |                   — |                   — |                      — |                    — |                   — |
+| SeqFold, 1× Intel SPR          | CPU  |   29.5 ms · 97 MCUPS |    292 ms · 52 MCUPS |   3.59 s · 21 MCUPS |     51.3 s · 7 MCUPS |     12 min · 3 MCUPS |                   — |                   — |                      — |                    — |                   — |
 
 > Measured 24 August 2026, random RNA under a fixed seed, Turner 2004 parameters.
 > Columns are sequence lengths in nucleotide "nt" bases.
@@ -111,11 +112,11 @@ Most ArchiveII tmRNA and RNase P sequences run under 400 bases, so the 384 colum
   <img alt="Cofolding wall clock against sequence length" src="assets/cofolding-light.svg">
 </picture>
 
-| Variant             |               24 nt |               32 nt |                48 nt |                64 nt |              96 nt |              128 nt |              192 nt |              256 nt |            320 nt |                 384 nt |
-| :------------------ | ------------------: | ------------------: | -------------------: | -------------------: | -----------------: | ------------------: | ------------------: | ------------------: | ----------------: | ---------------------: |
-| AffineGaps, H100    |  416 µs · 876 MCUPS | 773 µs · 2.89 GCUPS | 2.53 ms · 13.1 GCUPS | 7.41 ms · 23.7 GCUPS | 47 ms · 53.7 GCUPS | 220 ms · 70.6 GCUPS | 3.95 s · 44.8 GCUPS | 15.8 s · 56.5 GCUPS | 51.5 s · 75 GCUPS | 2.4 min · 84.2 GCUPS ¹ |
-| AffineGaps, 1xSPR   | 1.49 ms · 245 MCUPS | 6.83 ms · 327 MCUPS |    80 ms · 415 MCUPS |   624 ms · 281 MCUPS | 9.76 s · 259 MCUPS |  58.9 s · 264 MCUPS |                   — |                   — |                 — |                      — |
-| RNAstructure, 1xSPR |     84 ms · 4 MCUPS |   185 ms · 12 MCUPS |     8.51 s · 4 MCUPS |     21.6 s · 8 MCUPS |  9.5 min · 4 MCUPS |                   — |                   — |                   — |                 — |                      — |
+| Variant                      | Kind |               24 nt |               32 nt |                48 nt |                64 nt |              96 nt |              128 nt |              192 nt |              256 nt |            320 nt |                 384 nt |
+| :--------------------------- | :--: | ------------------: | ------------------: | -------------------: | -------------------: | -----------------: | ------------------: | ------------------: | ------------------: | ----------------: | ---------------------: |
+| AffineGaps, 132× Nvidia SM90 | GPU  |  416 µs · 876 MCUPS | 773 µs · 2.89 GCUPS | 2.53 ms · 13.1 GCUPS | 7.41 ms · 23.7 GCUPS | 47 ms · 53.7 GCUPS | 220 ms · 70.6 GCUPS | 3.95 s · 44.8 GCUPS | 15.8 s · 56.5 GCUPS | 51.5 s · 75 GCUPS | 2.4 min · 84.2 GCUPS ¹ |
+| AffineGaps, 1× Intel SPR     | CPU  | 1.49 ms · 245 MCUPS | 6.83 ms · 327 MCUPS |    80 ms · 415 MCUPS |   624 ms · 281 MCUPS | 9.76 s · 259 MCUPS |  58.9 s · 264 MCUPS |                   — |                   — |                 — |                      — |
+| RNAstructure, 1× Intel SPR   | CPU  |     84 ms · 4 MCUPS |   185 ms · 12 MCUPS |     8.51 s · 4 MCUPS |     21.6 s · 8 MCUPS |  9.5 min · 4 MCUPS |                   — |                   — |                   — |                 — |                      — |
 
 > Measured 24 August 2026, random RNA under a fixed seed, covariance scoring.
 > Columns are sequence lengths in nucleotide "nt" bases.
@@ -124,7 +125,7 @@ Most ArchiveII tmRNA and RNase P sequences run under 400 bases, so the 384 colum
 
 ### Alignment Speed Against WFA2
 
-One NVIDIA H100 80GB HBM3 against WFA2 on one CPU core, both reconstructing the alignment rather than only scoring it.
+132× Nvidia SM90 against WFA2 on 1× Intel SPR, both reconstructing the alignment rather than only scoring it.
 DNA pairs at 10 percent divergence, the range long-read work lives in, with every score checked to agree exactly before timing.
 
 ```
@@ -201,6 +202,9 @@ Where Mojo ships a toolchain — Linux on x86-64 or ARM, and macOS on Apple sili
 Everywhere else the same command leaves the NumPy reference alone, which answers identically and slower.
 Two optional extras, neither of them required: `numba` accelerates that reference and `color` paints the alignment.
 A checkout builds the binary natively with `pixi run build-cli`, with no Python at run time, and `uvx --from git+https://github.com/unum-science/AffineGaps.git affinegaps` runs it once without installing anything.
+The Mojo kernels build with Mojo 1.1 and MAX 26.6, on Linux and Apple silicon macOS.
+On macOS the GPU kernels use Metal and require macOS 15 or later, Xcode 16 or later, and the Metal toolchain.
+If the toolchain is missing, install it with `xcodebuild -downloadComponent MetalToolchain`.
 A downstream [pixi](https://pixi.sh) project takes the same git dependency through `pixi add --pypi`.
 Reaching the GPU needs an NVIDIA device with driver 580 or newer, and `available("mojo", "gpu")` reports whether this machine has one by trying a real alignment rather than assuming.
 
@@ -215,7 +219,7 @@ Naming neither picks the fastest the machine offers.
 ```python
 needleman_wunsch_gotoh_alignment(first, second)                     # fastest available
 needleman_wunsch_gotoh_alignment(first, second, backend="python")   # the reference
-zuker_fold(sequence, backend="mojo")                                # compiled, host
+zuker_fold(sequence, backend="mojo")                                 # compiled, host
 sankoff_cofold(first, second, backend="mojo", device="gpu")
 ```
 
@@ -237,7 +241,7 @@ affinegaps.gpu_specs()
 
 ### Aligning Two Sequences
 
-To obtain the alignment of two sequences, use the `needleman_wunsch_gotoh_alignment` function.
+To obtain the alignment of two sequences, use `needleman_wunsch_gotoh_alignment`.
 
 ```python
 from affinegaps import needleman_wunsch_gotoh_alignment

@@ -30,9 +30,10 @@ The recurrence, the tie-breaking and the traceback are transcribed from `cofoldi
 stays the parity oracle.
 """
 
-from std.gpu import block_idx, thread_idx
 from std.math import ceildiv
-from std.gpu.primitives.warp import WARP_SIZE, max as warp_max
+
+from max.gpu import block_idx, thread_idx
+from max.gpu.primitives.warp import WARP_SIZE, max as warp_max
 
 
 from errors import AffineGapsError, ErrorKind
@@ -40,6 +41,9 @@ from common import (
     CLOSE_BYTE,
     DEFAULT_RNA_ALPHABET,
     DeviceScope,
+    MIN_CLOSING_REACH,
+    MIN_TURN,
+    PartnerRange,
     GAP_BYTE,
     NEGATIVE_INFINITY,
     OPEN_BYTE,
@@ -62,10 +66,6 @@ comptime DEFAULT_SANKOFF_MATCH = Int32(2)
 """Credit for aligning two equal bases, which Sankoff scores rather than the Turner tables."""
 comptime DEFAULT_SANKOFF_MISMATCH = Int32(-1)
 comptime DEFAULT_SANKOFF_GAP = Int32(-2)
-comptime MIN_TURN = 3
-"""Fewest bases any pair must enclose, the same floor `folding.mojo` applies."""
-comptime MIN_CLOSING_REACH = MIN_TURN + 1
-"""The turn plus the partner past it: the shortest head-to-partner distance."""
 comptime CellDType = DType.int16
 """Storage for one table cell. Narrower than the arithmetic, because the table is what binds."""
 
@@ -175,16 +175,6 @@ struct PartnerIndex(Copyable, Movable):
     """Every position that can close a pair, the letters' runs laid end to end."""
     var bounds: List[Scalar[PositionDType]]
     """Letter `c`'s run at its first entry from `t` onwards, held at `c * (length + 1) + t`."""
-
-
-@fieldwise_init
-struct PartnerRange(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Half-open slice of one letter's run, covering the partners one window can reach."""
-
-    var low: Int
-    """First entry of the run that lands inside the window."""
-    var high: Int
-    """One past the run's last entry inside the window."""
 
 
 @fieldwise_init

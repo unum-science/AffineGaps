@@ -12,8 +12,8 @@ version = "1.0.0"
 # What an installed copy needs. Everything below is a feature named after its counterpart in
 # `pyproject.toml`, so a group added there has one obvious place to land here.
 [dependencies]
-max = ">=26.5,<27"
-mojo = ">=1.0.0,<2"
+max = ">=26.6,<27"
+mojo = ">=1.1.0,<2"
 numpy = ">=2.0"
 python = "3.12.*"
 
@@ -40,9 +40,9 @@ seqfold = ">=0.10"
 
 # `[dependency-groups]`
 [feature.lint.dependencies]
-black = ">=26"
 mypy = ">=2"
 ruff = ">=0.15"
+taplo = ">=0.9"
 
 [feature.test.pypi-dependencies]
 biopython = "*"
@@ -68,20 +68,21 @@ PYTHONNOUSERSITE = "1"
 prepare = "mkdir -p build"
 # Sibling modules resolve from the same directory, so each artifact names only its own root.
 # `$MOJO_ACCELERATOR` is empty locally, so the host's own GPU is detected; CI names one instead.
-build = {cmd = "mojo build affinegaps.mojo --emit shared-lib -o build/affinegaps_mojo.so $MOJO_ACCELERATOR", depends-on = ["prepare"]}
-build-cli = {cmd = "mojo build cli.mojo -o build/affinegaps $MOJO_ACCELERATOR", depends-on = ["prepare"]}
-format = "mojo format -l 120 *.mojo"
+build = { cmd = "mojo build affinegaps.mojo --emit shared-lib -o build/affinegaps_mojo.so $MOJO_ACCELERATOR", depends-on = ["prepare"] }
+build-cli = { cmd = "mojo build cli.mojo -o build/affinegaps $MOJO_ACCELERATOR", depends-on = ["prepare"] }
+format = "ruff format *.py && mojo format -l 120 *.mojo && taplo format"
 hooks = "git config core.hooksPath .githooks"
-test = {cmd = "pytest test.py", depends-on = ["build"]}
+test = { cmd = "pytest test.py", depends-on = ["build"] }
 # `data/archive-ii` has to resolve, and the rivals live in their own environment.
-accuracy = {cmd = "python bench.py accuracy --backend mojo --device gpu", depends-on = ["build"]}
-speed = {cmd = "python bench.py speed --backend mojo --device gpu", depends-on = ["build"]}
+accuracy = { cmd = "python bench.py accuracy --backend mojo --device gpu", depends-on = ["build"] }
+speed = { cmd = "python bench.py speed --backend mojo --device gpu", depends-on = ["build"] }
 
 # The checkers need this environment's interpreter to resolve NumPy and NumBa; that belongs here
 # rather than as a hardcoded path in the package metadata.
 lint = """
-uvx ruff check *.py &&
-uvx black --line-length 120 --skip-magic-trailing-comma --check *.py &&
+ruff check *.py &&
+ruff format --check *.py &&
+taplo format --check &&
 uvx pyright --pythonpath .pixi/envs/default/bin/python
 """
 

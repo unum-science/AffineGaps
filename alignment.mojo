@@ -22,15 +22,14 @@ For score-only work at much higher throughput, see `ashvardanian/StringZilla`, w
 traceback, which is what this module exists to provide.
 """
 
-from std.gpu import block_dim, block_idx, grid_dim, lane_id, thread_idx
 from std.math import ceildiv
-from std.gpu.primitives.warp import WARP_SIZE, shuffle_down, shuffle_up, shuffle_xor
 from std.memory import stack_allocation
 from std.memory.pointer import AddressSpace
-from std.sys.info import size_of
+from std.sys.info import CompilationTarget, size_of
 
 from max.algorithm import parallelize
-from max.gpu import barrier
+from max.gpu import barrier, block_dim, block_idx, grid_dim, lane_id, thread_idx
+from max.gpu.primitives.warp import WARP_SIZE, shuffle_down, shuffle_up, shuffle_xor
 from max.gpu.host import DeviceBuffer, FuncAttribute
 from max.gpu.memory import external_memory
 
@@ -1279,33 +1278,60 @@ def device_scores[
     var unused_changes = allocate[ChangeDType](scope, 1)
     var unused_offsets = zeroed[DType.int64](scope, 1)
     var unused_lengths = zeroed[ScoreDType](scope, 1)
+    var carry_cells = 1
+    comptime if TARGET_CARRY == CarryKind.GLOBAL:
+        carry_cells = CARRY_LAYERS * max(pairs, 1) * band_stride
+    var global_carry = allocate[ScoreDType](scope, carry_cells)
     var nowhere = unused_symbols.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
     """
     One placeholder fills every symbol slot. The origin cast is what lets it appear more than once in a launch, and it
     is sound because a discarding sweep reads none of them.
     """
 
-    scope.context.enqueue_function[strip_pair_kernel[mode, Recording.DISCARDED]](
-        sequences_buffer.unsafe_ptr(),
-        offsets_buffer.unsafe_ptr(),
-        substitutions_buffer.unsafe_ptr(),
-        nowhere,
-        unused_changes.unsafe_ptr(),
-        unused_offsets.unsafe_ptr(),
-        results_buffer.unsafe_ptr(),
-        nowhere,
-        nowhere,
-        unused_lengths.unsafe_ptr(),
-        Int32(0),
-        Int32(band_stride),
-        Int32(alphabet_size),
-        scoring.open,
-        scoring.extend,
-        grid_dim=pairs,
-        block_dim=STRIP_LANES,
-        shared_mem_bytes=dynamic_bytes,
-        func_attribute=FuncAttribute.MAX_DYNAMIC_SHARED_SIZE_BYTES(UInt32(dynamic_bytes)),
-    )
+    comptime if TARGET_CARRY == CarryKind.SHARED:
+        scope.context.enqueue_function[strip_pair_kernel[mode, Recording.DISCARDED, CarryKind.SHARED]](
+            sequences_buffer.unsafe_ptr(),
+            offsets_buffer.unsafe_ptr(),
+            substitutions_buffer.unsafe_ptr(),
+            nowhere,
+            unused_changes.unsafe_ptr(),
+            unused_offsets.unsafe_ptr(),
+            results_buffer.unsafe_ptr(),
+            nowhere,
+            nowhere,
+            unused_lengths.unsafe_ptr(),
+            Int32(0),
+            Int32(band_stride),
+            Int32(alphabet_size),
+            scoring.open,
+            scoring.extend,
+            global_carry.unsafe_ptr(),
+            grid_dim=pairs,
+            block_dim=STRIP_LANES,
+            shared_mem_bytes=dynamic_bytes,
+            func_attribute=FuncAttribute.MAX_DYNAMIC_SHARED_SIZE_BYTES(UInt32(dynamic_bytes)),
+        )
+    else:
+        scope.context.enqueue_function[strip_pair_kernel[mode, Recording.DISCARDED, CarryKind.GLOBAL]](
+            sequences_buffer.unsafe_ptr(),
+            offsets_buffer.unsafe_ptr(),
+            substitutions_buffer.unsafe_ptr(),
+            nowhere,
+            unused_changes.unsafe_ptr(),
+            unused_offsets.unsafe_ptr(),
+            results_buffer.unsafe_ptr(),
+            nowhere,
+            nowhere,
+            unused_lengths.unsafe_ptr(),
+            Int32(0),
+            Int32(band_stride),
+            Int32(alphabet_size),
+            scoring.open,
+            scoring.extend,
+            global_carry.unsafe_ptr(),
+            grid_dim=pairs,
+            block_dim=STRIP_LANES,
+        )
     scope.context.synchronize()
 
     var results = List[Int32](capacity=pairs)
@@ -1316,7 +1342,7 @@ def device_scores[
 
 
 def strip_pair_kernel[
-    mode: AlignmentMode, recording: Recording
+    mode: AlignmentMode, recording: Recording, carry_kind: CarryKind
 ](
     sequences: Pointer[Scalar[SymbolDType], MutAnyOrigin],
     offsets: Pointer[Scalar[OffsetDType], MutAnyOrigin],
@@ -1333,6 +1359,7 @@ def strip_pair_kernel[
     alphabet_size: Int32,
     open: Int32,
     extend: Int32,
+    global_carry: Pointer[Scalar[ScoreDType], MutAnyOrigin],
 ):
     """A recording strip: every decision is packed as the cell is computed, then walked back.
 
@@ -1376,15 +1403,24 @@ def strip_pair_kernel[
         else:
             reported[unsafe_offset=0] = 0
 
-    var carry = external_memory[Scalar[ScoreDType], address_space=AddressSpace.SHARED, alignment=16, name="carry"]()
-    var carry_scores = carry
-    var carry_insertions = carry.unsafe_offset(Int(carry_stride))
-    for index in range(Int(thread_idx.x), rows + 1, Int(block_dim.x)):
-        var border = Int32(0)
-        comptime if mode == AlignmentMode.GLOBAL:
-            border = 0 if index == 0 else scoring.open + Int32(index - 1) * scoring.extend
-        carry_scores[unsafe_offset=index] = border
-        carry_insertions[unsafe_offset=index] = border + scoring.open + scoring.extend
+    var carry_region = Int(block_idx.x) * Int(carry_stride) * CARRY_LAYERS
+    comptime if carry_kind == CarryKind.SHARED:
+        var shared_carry = external_memory[
+            Scalar[ScoreDType], address_space=AddressSpace.SHARED, alignment=16, name="carry"
+        ]()
+        for index in range(Int(thread_idx.x), rows + 1, Int(block_dim.x)):
+            var border = Int32(0)
+            comptime if mode == AlignmentMode.GLOBAL:
+                border = 0 if index == 0 else scoring.open + Int32(index - 1) * scoring.extend
+            shared_carry[unsafe_offset=index] = border
+            shared_carry[unsafe_offset=Int(carry_stride) + index] = border + scoring.open + scoring.extend
+    else:
+        for index in range(Int(thread_idx.x), rows + 1, Int(block_dim.x)):
+            var border = Int32(0)
+            comptime if mode == AlignmentMode.GLOBAL:
+                border = 0 if index == 0 else scoring.open + Int32(index - 1) * scoring.extend
+            global_carry[unsafe_offset=carry_region + index] = border
+            global_carry[unsafe_offset=carry_region + Int(carry_stride) + index] = border + scoring.open + scoring.extend
     barrier()
 
     var best = Int32(0)
@@ -1395,13 +1431,13 @@ def strip_pair_kernel[
         var first_column = strip * STRIP_WIDTH + lane * STRIP_COLUMNS
         var owned = min(max(columns - first_column, 0), STRIP_COLUMNS)
 
-        var symbols = InlineArray[Int32, STRIP_COLUMNS](fill=0)
+        var symbols = Array[Int32, STRIP_COLUMNS](fill=0)
         comptime for column_slot in range(STRIP_COLUMNS):
             var column = min(first_column + column_slot, columns - 1)
             symbols[column_slot] = Int32(sequences[unsafe_offset=second_start + max(column, 0)])
 
-        var scores = InlineArray[Int32, STRIP_COLUMNS](fill=0)
-        var deletions = InlineArray[Int32, STRIP_COLUMNS](fill=0)
+        var scores = Array[Int32, STRIP_COLUMNS](fill=0)
+        var deletions = Array[Int32, STRIP_COLUMNS](fill=0)
         comptime for column_slot in range(STRIP_COLUMNS):
             comptime if mode == AlignmentMode.GLOBAL:
                 scores[column_slot] = scoring.open + Int32(first_column + column_slot) * scoring.extend
@@ -1423,8 +1459,15 @@ def strip_pair_kernel[
             var left_insertion = shuffle_up(edge_insertion, 1)
             if lane == 0:
                 var here = min(max(row, 0), rows)
-                left_score = carry_scores[unsafe_offset=here]
-                left_insertion = carry_insertions[unsafe_offset=here]
+                comptime if carry_kind == CarryKind.SHARED:
+                    var shared_carry = external_memory[
+                        Scalar[ScoreDType], address_space=AddressSpace.SHARED, alignment=16, name="carry"
+                    ]()
+                    left_score = shared_carry[unsafe_offset=here]
+                    left_insertion = shared_carry[unsafe_offset=Int(carry_stride) + here]
+                else:
+                    left_score = global_carry[unsafe_offset=carry_region + here]
+                    left_insertion = global_carry[unsafe_offset=carry_region + Int(carry_stride) + here]
             var above_left_score = above_left_carry
             above_left_carry = left_score
 
@@ -1473,8 +1516,15 @@ def strip_pair_kernel[
                 edge_score = running_score
                 edge_insertion = running_insertion
                 if lane == STRIP_LANES - 1 and owned > 0:
-                    carry_scores[unsafe_offset=row] = scores[STRIP_COLUMNS - 1]
-                    carry_insertions[unsafe_offset=row] = running_insertion
+                    comptime if carry_kind == CarryKind.SHARED:
+                        var shared_carry = external_memory[
+                            Scalar[ScoreDType], address_space=AddressSpace.SHARED, alignment=16, name="carry"
+                        ]()
+                        shared_carry[unsafe_offset=row] = scores[STRIP_COLUMNS - 1]
+                        shared_carry[unsafe_offset=Int(carry_stride) + row] = running_insertion
+                    else:
+                        global_carry[unsafe_offset=carry_region + row] = scores[STRIP_COLUMNS - 1]
+                        global_carry[unsafe_offset=carry_region + Int(carry_stride) + row] = running_insertion
                 comptime if mode == AlignmentMode.GLOBAL:
                     if row == rows and owned > 0 and first_column + owned == columns:
                         reported[unsafe_offset=0] = scores[owned - 1]
@@ -1607,30 +1657,57 @@ def device_alignments[
     var first_buffer = allocate[SymbolDType](scope, max(pairs * widest, 1))
     var second_buffer = allocate[SymbolDType](scope, max(pairs * widest, 1))
     var lengths_buffer = zeroed[ScoreDType](scope, pairs)
+    var carry_stride = longest_first + 1
+    var dynamic_bytes = CARRY_LAYERS * carry_stride * size_of[Scalar[ScoreDType]]()
+    var carry_cells = 1
+    comptime if TARGET_CARRY == CarryKind.GLOBAL:
+        carry_cells = CARRY_LAYERS * max(pairs, 1) * carry_stride
+    var global_carry = allocate[ScoreDType](scope, carry_cells)
 
-    scope.context.enqueue_function[strip_pair_kernel[mode, Recording.TO_GLOBAL_MEMORY]](
-        sequences_buffer.unsafe_ptr(),
-        offsets_buffer.unsafe_ptr(),
-        substitutions_buffer.unsafe_ptr(),
-        letters_buffer.unsafe_ptr(),
-        changes_buffer.unsafe_ptr(),
-        change_offsets_buffer.unsafe_ptr(),
-        results_buffer.unsafe_ptr(),
-        first_buffer.unsafe_ptr(),
-        second_buffer.unsafe_ptr(),
-        lengths_buffer.unsafe_ptr(),
-        Int32(widest),
-        Int32(longest_first + 1),
-        Int32(alphabet_size),
-        scoring.open,
-        scoring.extend,
-        grid_dim=pairs,
-        block_dim=STRIP_LANES,
-        shared_mem_bytes=CARRY_LAYERS * (longest_first + 1) * size_of[Scalar[ScoreDType]](),
-        func_attribute=FuncAttribute.MAX_DYNAMIC_SHARED_SIZE_BYTES(
-            UInt32(CARRY_LAYERS * (longest_first + 1) * size_of[Scalar[ScoreDType]]())
-        ),
-    )
+    comptime if TARGET_CARRY == CarryKind.SHARED:
+        scope.context.enqueue_function[strip_pair_kernel[mode, Recording.TO_GLOBAL_MEMORY, CarryKind.SHARED]](
+            sequences_buffer.unsafe_ptr(),
+            offsets_buffer.unsafe_ptr(),
+            substitutions_buffer.unsafe_ptr(),
+            letters_buffer.unsafe_ptr(),
+            changes_buffer.unsafe_ptr(),
+            change_offsets_buffer.unsafe_ptr(),
+            results_buffer.unsafe_ptr(),
+            first_buffer.unsafe_ptr(),
+            second_buffer.unsafe_ptr(),
+            lengths_buffer.unsafe_ptr(),
+            Int32(widest),
+            Int32(carry_stride),
+            Int32(alphabet_size),
+            scoring.open,
+            scoring.extend,
+            global_carry.unsafe_ptr(),
+            grid_dim=pairs,
+            block_dim=STRIP_LANES,
+            shared_mem_bytes=dynamic_bytes,
+            func_attribute=FuncAttribute.MAX_DYNAMIC_SHARED_SIZE_BYTES(UInt32(dynamic_bytes)),
+        )
+    else:
+        scope.context.enqueue_function[strip_pair_kernel[mode, Recording.TO_GLOBAL_MEMORY, CarryKind.GLOBAL]](
+            sequences_buffer.unsafe_ptr(),
+            offsets_buffer.unsafe_ptr(),
+            substitutions_buffer.unsafe_ptr(),
+            letters_buffer.unsafe_ptr(),
+            changes_buffer.unsafe_ptr(),
+            change_offsets_buffer.unsafe_ptr(),
+            results_buffer.unsafe_ptr(),
+            first_buffer.unsafe_ptr(),
+            second_buffer.unsafe_ptr(),
+            lengths_buffer.unsafe_ptr(),
+            Int32(widest),
+            Int32(carry_stride),
+            Int32(alphabet_size),
+            scoring.open,
+            scoring.extend,
+            global_carry.unsafe_ptr(),
+            grid_dim=pairs,
+            block_dim=STRIP_LANES,
+        )
     scope.context.synchronize()
 
     var aligned = List[AlignmentResult](capacity=pairs)
@@ -1707,13 +1784,12 @@ def device_hirschberg(
         # levels, which hold only a handful of leaves, still run them in place.
         if len(leaves) >= PARALLEL_LEAF_FLOOR:
 
-            @parameter
-            def solve_leaf(slot: Int):
+            def solve_leaf(slot: Int) {imm}:
                 solve_frame(
                     first, second, leaves[slot], substitutions, alphabet_size, scoring, path_columns, path_layers
                 )
 
-            parallelize[solve_leaf](len(leaves), placement.threads)
+            parallelize(solve_leaf, len(leaves), placement.threads)
         else:
             for slot in range(len(leaves)):
                 solve_frame(
@@ -1862,6 +1938,27 @@ struct Recording(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
+struct CarryKind(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """Where a strip block keeps the column to its left.
+
+    CUDA can opt the carry into dynamic shared memory. Metal cannot, so the same two layers live in
+    a global buffer, one region per block. The height bound does not change: a pair the card's
+    shared memory cannot hold still takes the tiled sweep.
+    """
+
+    var identifier: UInt8
+    """Which case this names."""
+    comptime SHARED = Self(0)
+    """Dynamic shared memory, the CUDA opt-in."""
+    comptime GLOBAL = Self(1)
+    """A device buffer, indexed by block. What a Metal launch uses."""
+
+
+comptime TARGET_CARRY = CarryKind.GLOBAL if CompilationTarget.is_macos() else CarryKind.SHARED
+"""One artifact, one carry. macOS builds target Metal; Linux builds target CUDA."""
+
+
+@fieldwise_init
 struct SweepPlan(ImplicitlyCopyable, TrivialRegisterPassable):
     """One sub-rectangle's assignment: what to sweep, and where its edges live."""
 
@@ -1996,13 +2093,13 @@ def tiled_sweep_kernel[
             edge_inserts[unsafe_offset=index] = left_inserts[unsafe_offset=row_base + row]
     barrier()
 
-    var symbols = InlineArray[Int32, STRIP_COLUMNS](fill=0)
+    var symbols = Array[Int32, STRIP_COLUMNS](fill=0)
     """
     The tile's top row, for the columns this lane owns. Outside the matrix it is the affine ramp, or zero for a local
     sweep; inside it is whatever the tile above left behind.
     """
-    var scores = InlineArray[Int32, STRIP_COLUMNS](fill=0)
-    var deletions = InlineArray[Int32, STRIP_COLUMNS](fill=0)
+    var scores = Array[Int32, STRIP_COLUMNS](fill=0)
+    var deletions = Array[Int32, STRIP_COLUMNS](fill=0)
     comptime for column_slot in range(STRIP_COLUMNS):
         var column = column_begin + min(first_column + column_slot, width_span - 1) + 1
         var right_index = second_from + columns - column if reversed_order else second_from + column - 1

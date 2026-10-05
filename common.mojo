@@ -8,11 +8,11 @@ belongs to `folding.mojo`.
 """
 
 from std.ffi import c_int, c_size_t, external_call
-from std.gpu.primitives.warp import WARP_SIZE
 from std.memory import stack_allocation
 from std.sys.info import CompilationTarget, num_logical_cores, size_of
 
 from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext
+from max.gpu.primitives.warp import WARP_SIZE
 
 from errors import AffineGapsError, ErrorKind
 
@@ -41,6 +41,22 @@ comptime DEFAULT_RNA_ALPHABET = "ACGU"
 
 comptime RNA_ALPHABET_SIZE = DEFAULT_RNA_ALPHABET.byte_length()
 """Bases that alphabet emits, which is the stride of every table indexed by one of them."""
+
+comptime MIN_TURN = 3
+"""Fewest bases any pair must enclose, which is what the backbone can turn in."""
+
+comptime MIN_CLOSING_REACH = MIN_TURN + 1
+"""The turn plus the partner past it: the shortest head-to-partner distance."""
+
+
+@fieldwise_init
+struct PartnerRange(ImplicitlyCopyable, TrivialRegisterPassable):
+    """Half-open slice of one letter's run, covering the partners one window can reach."""
+
+    var low: Int
+    """First entry of the run that lands inside the window."""
+    var high: Int
+    """One past the run's last entry inside the window."""
 
 comptime OPEN_BYTE = Byte(ord("("))
 """Opens a base pair in dot-bracket notation."""
@@ -87,8 +103,7 @@ def hardware_threads() -> Int:
     glibc symbol, so naming it anywhere else fails at link time rather than at run time.
     """
 
-    @parameter
-    if CompilationTarget.is_linux():
+    comptime if CompilationTarget.is_linux():
         comptime WORDS = 16
         var mask = stack_allocation[WORDS, UInt64]()
         for index in range(WORDS):
@@ -153,19 +168,38 @@ struct GpuSpecs(ImplicitlyCopyable, TrivialRegisterPassable):
     """How many blocks one multiprocessor holds at once, which is what a level aims to saturate."""
 
 
+def attribute_or(context: DeviceContext, attribute: DeviceAttribute, fallback: Int) -> Int:
+    """A device attribute, or `fallback` when this accelerator does not report it.
+
+    Metal refuses the CUDA opt-in and occupancy queries. The per-block shared-memory figure is the
+    one it does report, and that is what a strip's carry is actually bounded by.
+    """
+    try:
+        return Int(context.get_attribute(attribute))
+    except:
+        return fallback
+
+
 def gpu_specs_fetch(context: DeviceContext) raises -> GpuSpecs:
     """One cold query of the properties every sweep sizes itself from.
 
-    Each is a live driver call, so they are asked together and once.
+    Each is a live driver call, so they are asked together and once. A missing CUDA-only attribute
+    falls back to the per-block shared-memory size, which Metal does report.
     """
-    var per_multiprocessor = Int(context.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
-    var per_block = Int(context.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_BLOCK_OPTIN))
+    var per_block = Int(context.get_attribute(DeviceAttribute.MAX_SHARED_MEMORY_PER_BLOCK))
+    var per_multiprocessor = attribute_or(
+        context, DeviceAttribute.MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, per_block
+    )
+    var opt_in = attribute_or(context, DeviceAttribute.MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, per_block)
+    var reserved = per_multiprocessor - opt_in
+    if reserved < 0:
+        reserved = 0
     return GpuSpecs(
         per_multiprocessor,
-        per_multiprocessor - per_block,
+        reserved,
         Int(context.max_single_alloc_size()),
-        Int(context.get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT)),
-        Int(context.get_attribute(DeviceAttribute.MAX_BLOCKS_PER_MULTIPROCESSOR)),
+        attribute_or(context, DeviceAttribute.MULTIPROCESSOR_COUNT, 1),
+        attribute_or(context, DeviceAttribute.MAX_BLOCKS_PER_MULTIPROCESSOR, 1),
     )
 
 
