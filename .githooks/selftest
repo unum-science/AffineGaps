@@ -93,6 +93,31 @@ subject claude-trailer    reject "Add: a thing
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 
+# Runs `commit-msg` alone, since `pre-commit` would judge the fixture's TOML against a real pixi workspace.
+# release <name> <reject|accept> <subject> <version> <pyproject.toml version>
+release() {
+    local name=$1 verdict=$2 text=$3 version=$4 pyproject=$5
+    local dir
+    dir=$(new_repo "release-$name")
+    printf '%s\n' "$version" > "$dir/VERSION"
+    printf 'cff-version: 1.2.0\nversion: %s\n' "$version" > "$dir/CITATION.cff"
+    printf '[project]\nversion = "%s"\n' "$pyproject" > "$dir/pyproject.toml"
+    printf '[workspace]\nversion = "%s"\n' "$version" > "$dir/pixi.toml"
+    printf '__version__ = "%s"\n' "$version" > "$dir/affinegaps.py"
+    git -C "$dir" add -A
+    printf '%s\n' "$text" > "$dir/message"
+    if (cd "$dir" && "$hooks_dir/commit-msg" message) > /dev/null 2>&1; then
+        [ "$verdict" = accept ] && report ok "$name" || report no "$name (accepted, should reject)"
+    else
+        [ "$verdict" = reject ] && report ok "$name" || report no "$name (rejected, should accept)"
+    fi
+}
+release every-site        accept "Release: v1.0.1" 1.0.1 1.0.1
+release candidate         accept "Release: v1.1.0-rc.1" 1.1.0-rc.1 1.1.0-rc.1
+release stale-site        reject "Release: v1.0.1" 1.0.1 1.0.0
+release untagged-subject  reject "Release: 1.0.1" 1.0.1 1.0.1
+release bump-outside      reject "Fix: Bump the version" 1.0.1 1.0.1
+
 echo
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]

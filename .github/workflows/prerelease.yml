@@ -1,15 +1,11 @@
 name: Pre-Release
 
 on:
-    push:
-        branches: ["main-dev"]
-        paths-ignore: ["**/*.md", "LICENSE", ".gitignore", "assets/**"]
     pull_request:
         branches: ["main", "main-dev"]
         paths-ignore: ["**/*.md", "LICENSE", ".gitignore", "assets/**"]
 
 env:
-    GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
     PYTHONUTF8: 1
     PYTHONFAULTHANDLER: 1
 
@@ -17,35 +13,33 @@ permissions:
     contents: read
 
 concurrency:
-    group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+    group: ${{ github.workflow }}-${{ github.head_ref }}
     cancel-in-progress: true
 
 jobs:
-    versioning:
-        name: Update Version
-        runs-on: ubuntu-24.04
-        timeout-minutes: 5
+    hooks:
+        name: Run Git Hooks
+        runs-on: ubuntu-26.04
+        timeout-minutes: 15
         steps:
             - name: Checkout
               uses: actions/checkout@v7
               with:
                   fetch-depth: 0
-                  persist-credentials: false
-            - name: Run TinySemVer
-              uses: ashvardanian/tinysemver@v3
+            # `pre-commit` refuses staged Mojo it cannot format, and the formatter lives in the pixi environment.
+            - name: Set Up Pixi
+              uses: prefix-dev/setup-pixi@v0.10.1
               with:
-                  verbose: "true"
-                  version-file: "VERSION"
-                  update-version-in: |
-                      pyproject.toml:^version = "(\d+\.\d+\.\d+)"
-                      pixi.toml:^version = "(\d+\.\d+\.\d+)"
-                      affinegaps.py:^__version__ = "(\d+\.\d+\.\d+)"
-                  dry-run: "true"
+                  pixi-version: latest
+                  cache: true
+            - name: Run the Hooks Over New Commits
+              run: .github/scripts/check-commits.sh "${{ github.event.pull_request.base.sha }}"
 
     # Gates the matrix below: a formatting or typing break is the same on every interpreter.
     lint:
         name: Static Analysis
-        runs-on: ubuntu-24.04
+        needs: hooks
+        runs-on: ubuntu-26.04
         timeout-minutes: 10
         steps:
             - name: Checkout
@@ -73,6 +67,7 @@ jobs:
     # covers both fleet targets rather than whichever one the runner guessed.
     build_mojo:
         name: Mojo Compiles (${{ matrix.os }}, ${{ matrix.target }})
+        needs: hooks
         runs-on: ${{ matrix.os }}
         timeout-minutes: 25
         strategy:
@@ -81,22 +76,22 @@ jobs:
                 # Apple reaches Metal, not CUDA, and every Apple GPU shares one budget, so M1 stands in for all.
                 include:
                     - {
-                          os: ubuntu-24.04,
+                          os: ubuntu-26.04,
                           target: sm_90a,
                           accelerator: --target-accelerator sm_90a,
                       }
                     - {
-                          os: ubuntu-24.04,
+                          os: ubuntu-26.04,
                           target: sm_100a,
                           accelerator: --target-accelerator sm_100a,
                       }
                     - {
-                          os: ubuntu-24.04-arm,
+                          os: ubuntu-26.04-arm,
                           target: sm_90a,
                           accelerator: --target-accelerator sm_90a,
                       }
                     - {
-                          os: ubuntu-24.04-arm,
+                          os: ubuntu-26.04-arm,
                           target: sm_100a,
                           accelerator: --target-accelerator sm_100a,
                       }
@@ -130,7 +125,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-24.04, macos-15, windows-2025]
+                os: [ubuntu-26.04, macos-26, windows-2025]
                 python-version: ["3.12", "3.13", "3.14"]
         steps:
             - name: Checkout
