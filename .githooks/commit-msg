@@ -28,7 +28,6 @@ case "$subject" in
         else
             stale=""
             [ "$(git show :VERSION 2> /dev/null)" = "$version" ] || stale="$stale VERSION"
-            git show :CITATION.cff 2> /dev/null | grep -qxF "version: $version" || stale="$stale CITATION.cff"
             git show :pyproject.toml 2> /dev/null | grep -qxF "version = \"$version\"" || stale="$stale pyproject.toml"
             git show :pixi.toml 2> /dev/null | grep -qxF "version = \"$version\"" || stale="$stale pixi.toml"
             git show :affinegaps.py 2> /dev/null | grep -qxF "__version__ = \"$version\"" || stale="$stale affinegaps.py"
