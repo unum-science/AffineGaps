@@ -18,11 +18,11 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
-  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.15",
   "Operating System :: OS Independent",
 ]
 dependencies = ["numpy"]
-description = "Exact biosequence alignment and folding on GPUs — Needleman-Wunsch, Smith-Waterman, Levenshtein, Zuker, and Sankoff with Gotoh adjustments and traceback"
+description = "Exact biosequence alignment and folding on GPUs by anti-diagonal sweeps"
 keywords = [
   "bioinformatics",
   "sequence alignment",

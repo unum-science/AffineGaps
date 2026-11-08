@@ -470,7 +470,7 @@ If AffineGaps helps your research or product, please cite it:
 ```bibtex
 @software{Vardanian_AffineGaps,
   author = {Vardanian, Ash},
-  title = {{AffineGaps: Exact biosequence alignment and folding on GPUs — Needleman-Wunsch, Smith-Waterman, Levenshtein, Zuker, and Sankoff with Gotoh adjustments and traceback}},
+  title = {{AffineGaps: Exact Biosequence Alignment and Folding on GPUs by Anti-Diagonal Sweeps}},
   doi = {10.5281/zenodo.22045581},
   url = {https://github.com/unum-science/AffineGaps},
   license = {Apache-2.0}

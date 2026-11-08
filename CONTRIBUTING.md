@@ -1,4 +1,4 @@
-# Contributing to Affine Gaps
+# Contributing to AffineGaps
 
 ## Getting Started
 
